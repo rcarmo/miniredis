@@ -364,6 +364,18 @@ class MiniRedis(object):
         client.table[key] = data
         self.log(client, 'SETNX %s -> %s' % (key, data))
         return 1
+    
+    def handle_getset(self, client, key, data):
+        old_data = client.table.get(key, None)
+        if isinstance(old_data, deque):
+            return BAD_VALUE
+        if old_data != None:
+            old_data = str(old_data)
+        else:
+            old_data = EMPTY_SCALAR
+        client.table[key] = data
+        self.log(client, 'GETSET %s %s -> %s' % (key, data, old_data))
+        return old_data
 
     def handle_shutdown(self, client):
         self.log(client, 'SHUTDOWN')
