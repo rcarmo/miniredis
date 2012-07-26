@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # Copyright (C) 2010 Benjamin Pollack.  All rights reserved.
+# Extended by Rui Carmo on Jul 2012
 
 from __future__ import with_statement
 
@@ -73,6 +74,7 @@ class MiniRedis(object):
 
         self.clients = {}
         self.tables = {}
+        self.channels = {}
         self.db_file = db_file
         self.lastsave = int(time.time())
 
@@ -376,6 +378,41 @@ class MiniRedis(object):
         client.table[key] = data
         self.log(client, 'GETSET %s %s -> %s' % (key, data, old_data))
         return old_data
+
+    def handle_publish(self, client, channel, message):
+        for p in self.channels.keys():
+            if re.match(p, channel):
+                for c in self.channels[channel]:
+                    c.wfile.write('*3\r\n')
+                    c.wfile.write('$%d\r\n' % len('message'))
+                    c.wfile.write('message\r\n')
+                    c.wfile.write('$%d\r\n' % len(channel))
+                    c.wfile.write(channel + '\r\n')
+                    c.wfile.write('$%d\r\n' % len(message))
+                    c.wfile.write(message + '\r\n')
+        return True
+
+    def handle_subscribe(self, client, channel):
+        for c in channels.trim().split(' '):
+            if c not in self.channels.keys():
+                self.channels[c] = []
+            self.channels[c].append(client)
+        return True
+
+    def handle_unsubscribe(self, client, channels):
+        # TODO: handle no args (full unsubscribe)
+        for c in channels.trim().split(' '):
+            try:
+                self.channels[c].remove(client)
+            except:
+                return False
+        return True
+
+    def handle_psubscribe(self, client, patterns):
+        pass
+
+    def handle_punsubscribe(self, client, patterns):
+        pass
 
     def handle_shutdown(self, client):
         self.log(client, 'SHUTDOWN')
