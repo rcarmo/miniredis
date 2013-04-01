@@ -18,9 +18,9 @@ import os, sys, stat, mmap, thread, time, logging
 log = logging.getLogger()
 
 try:
-    import marshal as pickle
-except ImportError:
     import cPickle as pickle
+except ImportError:
+    import marshal as pickle
 
 class Haystack(dict):
 
