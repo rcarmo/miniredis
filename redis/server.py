@@ -1,22 +1,20 @@
 #!/usr/bin/env python
-# Copyright (C) 2010 Benjamin Pollack.  All rights reserved.
-# Extended by Rui Carmo on Jul 2012
+# encoding: utf-8
+"""
+Based on a minimalist Redis server originally written by Benjamin Pollack
+
+First modified by Rui Carmo on 2013-03-12
+Published under the MIT license.
+"""
 
 from __future__ import with_statement
-
-import datetime
-import errno
-import getopt
-import os
-import re
-import pickle
-import select
-import signal
-import socket
-import sys
-import time
-
+import os, sys, time, logging
+import socket, select, thread, signal, errno
+import re, getopt
 from collections import deque
+from haystack import Haystack
+
+log = logging.getLogger()
 
 class RedisConstant(object):
     def __init__(self, type):
@@ -59,26 +57,20 @@ class RedisClient(object):
         self.db = None
         self.table = None
 
-class MiniRedis(object):
-    def __init__(self, host='127.0.0.1', port=6379, log_file=None, db_file=None):
-        super(MiniRedis, self).__init__()
+
+class RedisServer(object):
+    def __init__(self, host='127.0.0.1', port=6379, db_path='.'):
+        super(RedisServer, self).__init__()
         self.host = host
         self.port = port
-        if log_file:
-            self.log_name = log_file
-            self.log_file = open(self.log_name, 'w')
-        else:
-            self.log_name = None
-            self.log_file = sys.stdout
         self.halt = True
-
         self.clients = {}
         self.tables = {}
         self.channels = {}
-        self.db_file = db_file
         self.lastsave = int(time.time())
+        self.path = db_path
+        self.meta = Haystack(self.path,'meta')
 
-        self.load()
 
     def dump(self, client, o):
         nl = '\r\n'
@@ -105,24 +97,19 @@ class MiniRedis(object):
             client.wfile.write('return type not yet implemented\r\n')
         client.wfile.flush()
 
-    def load(self):
-        if self.db_file and os.path.lexists(self.db_file):
-            with open(self.db_file, 'rb') as f:
-                self.tables = pickle.load(f)
-                self.log(None, 'loaded database from file "%s"' % self.db_file)
 
     def log(self, client, s):
         try:
             who = '%s:%s' % client.socket.getpeername() if client else 'SERVER'
         except:
             who = '<CLOSED>'
-        self.log_file.write('%s - %s: %s\n' % (datetime.datetime.now(), who, s))
-        self.log_file.flush()
+        log.debug("%s: %s" % (who, s))
+
 
     def handle(self, client):
         line = client.rfile.readline()
         if not line:
-            self.log(client, 'client disconnected')
+            log.debug(client, 'client disconnected')
             del self.clients[client.socket]
             client.socket.close()
             return
@@ -135,9 +122,11 @@ class MiniRedis(object):
         command = args[0].lower()
         self.dump(client, getattr(self, 'handle_' + command)(client, *args[1:]))
 
+
     def rotate(self):
-        self.log_file.close()
-        self.log_file = open(self.log_name, 'w')
+        log.debug_file.close()
+        log.debug_file = open(log.debug_name, 'w')
+
 
     def run(self):
         self.halt = False
@@ -157,38 +146,47 @@ class MiniRedis(object):
                     (client_socket, address) = server.accept()
                     client = RedisClient(client_socket)
                     self.clients[client_socket] = client
-                    self.log(client, 'client connected')
+                    log.debug(client, 'client connected')
                     self.select(client, 0)
                 else:
                     try:
                         self.handle(self.clients[sock])
                     except Exception, e:
-                        self.log(client, 'exception: %s' % e)
+                        log.debug(client, 'exception: %s' % e)
                         self.handle_quit(client)
         for client_socket in self.clients.iterkeys():
             client_socket.close()
         self.clients.clear()
         server.close()
 
+
     def save(self):
-        if self.db_file:
-            with open(self.db_file, 'wb') as f:
-                pickle.dump(self.tables, f, pickle.HIGHEST_PROTOCOL)
-            self.lastsave = int(time.time())
+        for db in self.tables:
+            if db == 0:
+                self.meta['0'] = self.tables[0]
+                self.meta.commit()
+            else:
+                self.tables[db].commit()
+        self.lastsave = int(time.time())
+
 
     def select(self, client, db):
         if db not in self.tables:
-            self.tables[db] = {}
+            if db == 0:
+                self.tables[db] = {}
+                self.tables[db].update(self.meta.get('0',{}))
+            else:
+                self.tables[db] = Haystack(self.path,str(db))
         client.db = db
         client.table = self.tables[db]
 
+
     def stop(self):
         if not self.halt:
-            self.log(None, 'STOPPING')
+            log.debug(None, 'STOPPING')
             self.save()
             self.halt = True
 
-    # HANDLERS
 
     def handle_bgsave(self, client):
         if hasattr(os, 'fork'):
@@ -197,32 +195,38 @@ class MiniRedis(object):
                 sys.exit(0)
         else:
             self.save()
-        self.log(client, 'BGSAVE')
+        log.debug(client, 'BGSAVE')
         return RedisMessage('Background saving started')
+
 
     def handle_decr(self, client, key):
         return self.handle_decrby(self, client, key, 1)
 
+
     def handle_decrby(self, client, key, by):
         return self.handle_incrby(self, client, key, -by)
 
+
     def handle_del(self, client, key):
-        self.log(client, 'DEL %s' % key)
+        log.debug(client, 'DEL %s' % key)
         if key not in client.table:
             return 0
         del client.table[key]
         return 1
 
+
     def handle_flushdb(self, client):
-        self.log(client, 'FLUSHDB')
+        log.debug(client, 'FLUSHDB')
         client.table.clear()
         return True
 
+
     def handle_flushall(self, client):
-        self.log(client, 'FLUSHALL')
+        log.debug(client, 'FLUSHALL')
         for table in self.tables.itervalues():
             table.clear()
         return True
+
 
     def handle_get(self, client, key):
         data = client.table.get(key, None)
@@ -232,11 +236,13 @@ class MiniRedis(object):
             data = str(data)
         else:
             data = EMPTY_SCALAR
-        self.log(client, 'GET %s -> %s' % (key, data))
+        log.debug(client, 'GET %s -> %s' % (key, data))
         return data
+
 
     def handle_incr(self, client, key):
         return self.handle_incrby(client, key, 1)
+
 
     def handle_incrby(self, client, key, by):
         try:
@@ -244,16 +250,19 @@ class MiniRedis(object):
             client.table[key] += int(by)
         except (KeyError, TypeError, ValueError):
             client.table[key] = 1
-        self.log(client, 'INCRBY %s %s -> %s' % (key, by, client.table[key]))
+        log.debug(client, 'INCRBY %s %s -> %s' % (key, by, client.table[key]))
         return client.table[key]
+
 
     def handle_keys(self, client, pattern):
         r = re.compile(pattern.replace('*', '.*'))
-        self.log(client, 'KEYS %s' % pattern)
+        log.debug(client, 'KEYS %s' % pattern)
         return [k for k in client.table.keys() if r.search(k)]
+
 
     def handle_lastsave(self, client):
         return self.lastsave
+
 
     def handle_llen(self, client, key):
         if key not in client.table:
@@ -261,6 +270,7 @@ class MiniRedis(object):
         if not isinstance(client.table[key], deque):
             return BAD_VALUE
         return len(client.table[key])
+
 
     def handle_lpop(self, client, key):
         if key not in client.table:
@@ -271,8 +281,9 @@ class MiniRedis(object):
             data = client.table[key].popleft()
         else:
             data = EMPTY_SCALAR
-        self.log(client, 'LPOP %s -> %s' % (key, data))
+        log.debug(client, 'LPOP %s -> %s' % (key, data))
         return data
+
 
     def handle_lpush(self, client, key, data):
         if key not in client.table:
@@ -280,8 +291,9 @@ class MiniRedis(object):
         elif not isinstance(client.table[key], deque):
             return BAD_VALUE
         client.table[key].appendleft(data)
-        self.log(client, 'LPUSH %s %s' % (key, data))
+        log.debug(client, 'LPUSH %s %s' % (key, data))
         return True
+
 
     def handle_lrange(self, client, key, low, high):
         low, high = int(low), int(high)
@@ -292,12 +304,14 @@ class MiniRedis(object):
         if not isinstance(client.table[key], deque):
             return BAD_VALUE
         l = list(client.table[key])[low:high]
-        self.log(client, 'LRANGE %s %s %s -> %s' % (key, low, high, l))
+        log.debug(client, 'LRANGE %s %s %s -> %s' % (key, low, high, l))
         return l
 
+
     def handle_ping(self, client):
-        self.log(client, 'PING -> PONG')
+        log.debug(client, 'PING -> PONG')
         return RedisMessage('PONG')
+
 
     def handle_rpop(self, client, key):
         if key not in client.table:
@@ -308,8 +322,9 @@ class MiniRedis(object):
             data = client.table[key].pop()
         else:
             data = EMPTY_SCALAR
-        self.log(client, 'RPOP %s -> %s' % (key, data))
+        log.debug(client, 'RPOP %s -> %s' % (key, data))
         return data
+
 
     def handle_rpush(self, client, key, data):
         if key not in client.table:
@@ -317,8 +332,9 @@ class MiniRedis(object):
         elif not isinstance(client.table[key], deque):
             return BAD_VALUE
         client.table[key].append(data)
-        self.log(client, 'RPUSH %s %s' % (key, data))
+        log.debug(client, 'RPUSH %s %s' % (key, data))
         return True
+
 
     def handle_type(self, client, key):
         if key not in client.table:
@@ -336,37 +352,43 @@ class MiniRedis(object):
         else:
             return RedisError('unknown data type')
 
+
     def handle_quit(self, client):
         client.socket.shutdown(socket.SHUT_RDWR)
         client.socket.close()
-        self.log(client, 'QUIT')
+        log.debug(client, 'QUIT')
         del self.clients[client.socket]
         return False
 
+
     def handle_save(self, client):
         self.save()
-        self.log(client, 'SAVE')
+        log.debug(client, 'SAVE')
         return True
+
 
     def handle_select(self, client, db):
         db = int(db)
         self.select(client, db)
-        self.log(client, 'SELECT %s' % db)
+        log.debug(client, 'SELECT %s' % db)
         return True
+
 
     def handle_set(self, client, key, data):
         client.table[key] = data
-        self.log(client, 'SET %s -> %s' % (key, data))
+        log.debug(client, 'SET %s -> %s' % (key, data))
         return True
+
 
     def handle_setnx(self, client, key, data):
         if key in client.table:
-            self.log(client, 'SETNX %s -> %s FAILED' % (key, data))
+            log.debug(client, 'SETNX %s -> %s FAILED' % (key, data))
             return 0
         client.table[key] = data
-        self.log(client, 'SETNX %s -> %s' % (key, data))
+        log.debug(client, 'SETNX %s -> %s' % (key, data))
         return 1
     
+
     def handle_getset(self, client, key, data):
         old_data = client.table.get(key, None)
         if isinstance(old_data, deque):
@@ -376,8 +398,9 @@ class MiniRedis(object):
         else:
             old_data = EMPTY_SCALAR
         client.table[key] = data
-        self.log(client, 'GETSET %s %s -> %s' % (key, data, old_data))
+        log.debug(client, 'GETSET %s %s -> %s' % (key, data, old_data))
         return old_data
+
 
     def handle_publish(self, client, channel, message):
         for p in self.channels.keys():
@@ -392,12 +415,14 @@ class MiniRedis(object):
                     c.wfile.write(message + '\r\n')
         return True
 
-    def handle_subscribe(self, client, channel):
+
+    def handle_subscribe(self, client, channels):
         for c in channels.trim().split(' '):
             if c not in self.channels.keys():
                 self.channels[c] = []
             self.channels[c].append(client)
         return True
+
 
     def handle_unsubscribe(self, client, channels):
         # TODO: handle no args (full unsubscribe)
@@ -408,17 +433,21 @@ class MiniRedis(object):
                 return False
         return True
 
+
     def handle_psubscribe(self, client, patterns):
         pass
+
 
     def handle_punsubscribe(self, client, patterns):
         pass
 
+
     def handle_shutdown(self, client):
-        self.log(client, 'SHUTDOWN')
+        log.debug(client, 'SHUTDOWN')
         self.halt = True
         self.save()
         return self.handle_quit(client)
+
 
 def main(args):
     if os.name == 'posix':
@@ -429,16 +458,14 @@ def main(args):
         signal.signal(signal.SIGTERM, sigterm)
         signal.signal(signal.SIGHUP, sighup)
 
-    host, port, log_file, db_file = '127.0.0.1', 6379, None, None
-    opts, args = getopt.getopt(args, 'h:p:d:l:f:')
+    host, port, db_path = '127.0.0.1', 6379, '.'
+    opts, args = getopt.getopt(args, 'h:p:d:f:')
     pid_file = None
     for o, a in opts:
         if o == '-h':
             host = a
         elif o == '-p':
             port = int(a)
-        elif o == '-l':
-            log_file = os.path.abspath(a)
         elif o == '-d':
             db_file = os.path.abspath(a)
         elif o == '-f':
@@ -446,7 +473,7 @@ def main(args):
     if pid_file:
         with open(pid_file, 'w') as f:
             f.write('%s\n' % os.getpid())
-    m = MiniRedis(host=host, port=port, log_file=log_file, db_file=db_file)
+    m = RedisServer(host=host, port=port, db_path=db_path)
     try:
         m.run()
     except KeyboardInterrupt:
