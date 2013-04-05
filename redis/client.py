@@ -28,6 +28,8 @@ class RedisClient(object):
 
     def parse_response(self):
         rsp = self.file.readline()
+        if not rsp:
+            return
 
         def error(*a): raise Exception(*a)
 

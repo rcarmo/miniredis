@@ -7,9 +7,10 @@ First modified by Rui Carmo on 2013-03-12
 Published under the MIT license.
 """
 
-from gevent import monkey; monkey.patch_all()
 import os, sys, logging
 from redis.server import RedisServer
+
+#logging.basicConfig(level=logging.DEBUG)
 
 def main():
     m = RedisServer()

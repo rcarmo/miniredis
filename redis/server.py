@@ -20,6 +20,9 @@ class RedisConstant(object):
     def __init__(self, type):
         self.type = type
 
+    def __len__(self):
+        return 0
+
     def __repr__(self):
         return '<RedisConstant(%s)>' % self.type
 
@@ -109,7 +112,7 @@ class RedisServer(object):
     def handle(self, client):
         line = client.rfile.readline()
         if not line:
-            log.debug(client, 'client disconnected')
+            self.log(client, 'client disconnected')
             del self.clients[client.socket]
             client.socket.close()
             return
@@ -124,8 +127,8 @@ class RedisServer(object):
 
 
     def rotate(self):
-        log.debug_file.close()
-        log.debug_file = open(log.debug_name, 'w')
+        self.log_file.close()
+        self.log_file = open(self.log_name, 'w')
 
 
     def run(self):
@@ -146,13 +149,13 @@ class RedisServer(object):
                     (client_socket, address) = server.accept()
                     client = RedisClient(client_socket)
                     self.clients[client_socket] = client
-                    log.debug(client, 'client connected')
+                    self.log(client, 'client connected')
                     self.select(client, 0)
                 else:
                     try:
                         self.handle(self.clients[sock])
                     except Exception, e:
-                        log.debug(client, 'exception: %s' % e)
+                        self.log(client, 'exception: %s' % e)
                         self.handle_quit(client)
         for client_socket in self.clients.iterkeys():
             client_socket.close()
@@ -183,7 +186,7 @@ class RedisServer(object):
 
     def stop(self):
         if not self.halt:
-            log.debug(None, 'STOPPING')
+            self.log(None, 'STOPPING')
             self.save()
             self.halt = True
 
@@ -195,7 +198,7 @@ class RedisServer(object):
                 sys.exit(0)
         else:
             self.save()
-        log.debug(client, 'BGSAVE')
+        self.log(client, 'BGSAVE')
         return RedisMessage('Background saving started')
 
 
@@ -208,7 +211,7 @@ class RedisServer(object):
 
 
     def handle_del(self, client, key):
-        log.debug(client, 'DEL %s' % key)
+        self.log(client, 'DEL %s' % key)
         if key not in client.table:
             return 0
         del client.table[key]
@@ -216,13 +219,13 @@ class RedisServer(object):
 
 
     def handle_flushdb(self, client):
-        log.debug(client, 'FLUSHDB')
+        self.log(client, 'FLUSHDB')
         client.table.clear()
         return True
 
 
     def handle_flushall(self, client):
-        log.debug(client, 'FLUSHALL')
+        self.log(client, 'FLUSHALL')
         for table in self.tables.itervalues():
             table.clear()
         return True
@@ -236,7 +239,7 @@ class RedisServer(object):
             data = str(data)
         else:
             data = EMPTY_SCALAR
-        log.debug(client, 'GET %s -> %s' % (key, data))
+        self.log(client, 'GET %s -> %d' % (key, len(data)))
         return data
 
 
@@ -250,13 +253,13 @@ class RedisServer(object):
             client.table[key] += int(by)
         except (KeyError, TypeError, ValueError):
             client.table[key] = 1
-        log.debug(client, 'INCRBY %s %s -> %s' % (key, by, client.table[key]))
+        self.log(client, 'INCRBY %s %s -> %s' % (key, by, client.table[key]))
         return client.table[key]
 
 
     def handle_keys(self, client, pattern):
         r = re.compile(pattern.replace('*', '.*'))
-        log.debug(client, 'KEYS %s' % pattern)
+        self.log(client, 'KEYS %s' % pattern)
         return [k for k in client.table.keys() if r.search(k)]
 
 
@@ -281,7 +284,7 @@ class RedisServer(object):
             data = client.table[key].popleft()
         else:
             data = EMPTY_SCALAR
-        log.debug(client, 'LPOP %s -> %s' % (key, data))
+        self.log(client, 'LPOP %s -> %s' % (key, data))
         return data
 
 
@@ -291,7 +294,7 @@ class RedisServer(object):
         elif not isinstance(client.table[key], deque):
             return BAD_VALUE
         client.table[key].appendleft(data)
-        log.debug(client, 'LPUSH %s %s' % (key, data))
+        self.log(client, 'LPUSH %s %s' % (key, data))
         return True
 
 
@@ -304,12 +307,12 @@ class RedisServer(object):
         if not isinstance(client.table[key], deque):
             return BAD_VALUE
         l = list(client.table[key])[low:high]
-        log.debug(client, 'LRANGE %s %s %s -> %s' % (key, low, high, l))
+        self.log(client, 'LRANGE %s %s %s -> %s' % (key, low, high, l))
         return l
 
 
     def handle_ping(self, client):
-        log.debug(client, 'PING -> PONG')
+        self.log(client, 'PING -> PONG')
         return RedisMessage('PONG')
 
 
@@ -322,7 +325,7 @@ class RedisServer(object):
             data = client.table[key].pop()
         else:
             data = EMPTY_SCALAR
-        log.debug(client, 'RPOP %s -> %s' % (key, data))
+        self.log(client, 'RPOP %s -> %s' % (key, data))
         return data
 
 
@@ -332,7 +335,7 @@ class RedisServer(object):
         elif not isinstance(client.table[key], deque):
             return BAD_VALUE
         client.table[key].append(data)
-        log.debug(client, 'RPUSH %s %s' % (key, data))
+        self.log(client, 'RPUSH %s %s' % (key, data))
         return True
 
 
@@ -356,36 +359,36 @@ class RedisServer(object):
     def handle_quit(self, client):
         client.socket.shutdown(socket.SHUT_RDWR)
         client.socket.close()
-        log.debug(client, 'QUIT')
+        self.log(client, 'QUIT')
         del self.clients[client.socket]
         return False
 
 
     def handle_save(self, client):
         self.save()
-        log.debug(client, 'SAVE')
+        self.log(client, 'SAVE')
         return True
 
 
     def handle_select(self, client, db):
         db = int(db)
         self.select(client, db)
-        log.debug(client, 'SELECT %s' % db)
+        self.log(client, 'SELECT %s' % db)
         return True
 
 
     def handle_set(self, client, key, data):
         client.table[key] = data
-        log.debug(client, 'SET %s -> %s' % (key, data))
+        self.log(client, 'SET %s -> %d' % (key, len(data)))
         return True
 
 
     def handle_setnx(self, client, key, data):
         if key in client.table:
-            log.debug(client, 'SETNX %s -> %s FAILED' % (key, data))
+            self.log(client, 'SETNX %s -> %d FAILED' % (key, len(data)))
             return 0
         client.table[key] = data
-        log.debug(client, 'SETNX %s -> %s' % (key, data))
+        self.log(client, 'SETNX %s -> %d' % (key, len(data)))
         return 1
     
 
@@ -398,7 +401,7 @@ class RedisServer(object):
         else:
             old_data = EMPTY_SCALAR
         client.table[key] = data
-        log.debug(client, 'GETSET %s %s -> %s' % (key, data, old_data))
+        self.log(client, 'GETSET %s %s -> %s' % (key, data, old_data))
         return old_data
 
 
@@ -443,11 +446,34 @@ class RedisServer(object):
 
 
     def handle_shutdown(self, client):
-        log.debug(client, 'SHUTDOWN')
+        self.log(client, 'SHUTDOWN')
         self.halt = True
         self.save()
         return self.handle_quit(client)
 
+
+class ThreadedRedisServer(RedisServer):
+
+    def __init__(self, **kwargs):
+        super(ThreadedRedisServer, self).__init__(*kwargs)
+
+    def thread(self, sock, address):
+        client = RedisClient(sock)
+        self.clients[sock] = client
+        self.log(client, 'client connected')
+        self.select(client,0)
+        while True:
+            try:
+                self.handle(self.clients[sock])
+            except Exception, e:
+                self.log(client, 'exception: %s' % e)
+                break
+        try:
+            self.handle_quit(client)
+        except Exception, e:
+            log.debug(">>> %s" % e)
+            pass
+        
 
 def main(args):
     if os.name == 'posix':

@@ -19,13 +19,15 @@ if __name__=='__main__':
     def timed(count):
         c = RedisClient()
         c.select(0)
-        seq = range(0,10000)
-        for i in seq:
-            c.set(random.choice(seq),'bar' * random.choice(seq))
+        seq = range(0,count)
         now = time.time()
-        for i in range(0,count):
-            c.get(random.choice(seq))
+        for i in seq:
+            it = str(random.choice(seq))
+            c.set(it, it)
+            it = str(random.choice(seq))
+            c.get(it)
         return time.time() - now
 
     p = Pool(2)
     print p.map(timed,[10000,10000,10000,10000])
+    #print timed(10000)
