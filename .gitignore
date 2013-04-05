@@ -1,2 +1,6 @@
 *.swp
 *.db
+*.bin
+*.idx
+*.pyc
+.DS_Store
