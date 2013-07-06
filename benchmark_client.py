@@ -18,7 +18,7 @@ log = logging.getLogger()
 if __name__=='__main__':
     def timed(count):
         c = RedisClient()
-        c.select(0)
+        c.select(1)
         seq = range(0,count)
         now = time.time()
         for i in seq:
@@ -28,6 +28,6 @@ if __name__=='__main__':
             c.get(it)
         return time.time() - now
 
-    p = Pool(2)
+    p = Pool(4)
     print p.map(timed,[10000,10000,10000,10000])
     #print timed(10000)
