@@ -26,8 +26,8 @@ if __name__=='__main__':
             c.set(it, it)
             it = str(random.choice(seq))
             c.get(it)
-        return time.time() - now
+        return count/(time.time() - now)
 
     p = Pool(4)
-    print p.map(timed,[10000,10000,10000,10000])
+    print sum(p.map(timed,[10000,10000,10000,10000]))
     #print timed(10000)

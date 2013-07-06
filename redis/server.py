@@ -76,7 +76,7 @@ class RedisServer(object):
         self.channels = {}
         self.lastsave = int(time.time())
         self.path = db_path
-        self.meta = Haystack(self.path,'meta')
+        self.meta = Haystack(self.path,'redisdb')
         self.expiries = self.meta.get('expiries',{})
 
 
@@ -205,15 +205,15 @@ class RedisServer(object):
     def save(self):
         """Serialize tables to disk"""
         self.meta['expiries'] = self.expiries
-        self.meta.commit()
         for db in self.tables:
-            self.tables[db].commit()
+            self.meta[db] = self.tables[db]
+        self.meta.commit()
         self.lastsave = int(time.time())
 
 
     def select(self, client, db):
         if db not in self.tables:
-            self.tables[db] = Haystack(self.path,'db'+str(db))
+            self.tables[db] = self.meta.get(db,{})
         client.db = db
         client.table = self.tables[db]
 
