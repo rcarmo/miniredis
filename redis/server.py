@@ -11,7 +11,7 @@ from __future__ import with_statement
 from collections import deque
 import os, sys, time, logging, signal, getopt
 import socket, select, thread, errno
-from random import sample
+from random import sample, choice
 
 log = logging.getLogger()
 
@@ -225,26 +225,16 @@ class RedisServer(object):
             self.halt = True
 
 
-    def handle_bgsave(self, client):
-        if hasattr(os, 'fork'):
-            if not os.fork():
-                self.save()
-                sys.exit(0)
-        else:
-            self.save()
-        self.log(client, 'BGSAVE')
-        return RedisMessage('Background saving started')
+    def check_ttl(self, client, key):
+        k = "%s %s" % (client.db,key)
+        if k in self.expiries:
+            if self.expiries[k] <= time.time():
+                self.handle_del(client, key)
 
 
-    def handle_decr(self, client, key):
-        self.check_ttl(client, key)
-        return self.handle_decrby(self, client, key, 1)
+    # command handlers, sorted by order of redis.io docs
 
-
-    def handle_decrby(self, client, key, by):
-        self.check_ttl(client, key)
-        return self.handle_incrby(self, client, key, -by)
-
+    # Keys
 
     def handle_del(self, client, key):
         self.handle_persist(client, key)
@@ -255,19 +245,55 @@ class RedisServer(object):
         return 1
 
 
+    def handle_dump(self, client, key):
+        self.log(client, 'DUMP %s' % key)
+        # no special internal representation
+        return str(client.table[key])
+
+
     def handle_exists(self, client, key):
         self.check_ttl(client, key)
         return key in client.table
 
 
     def handle_expire(self, client, key, ttl):
+        if key not in client.table:
+            return 0
         self.expiries["%s %s" % (client.db,key)] = time.time() + ttl
         return 1
 
 
     def handle_expireat(self, client, key, when):
+        if key not in client.table:
+            return 0
         self.expiries["%s %s" % (client.db,key)] = when
         return 1
+
+
+    def handle_keys(self, client, pattern):
+        r = re.compile('^' + pattern.replace('*', '.*') + '$') 
+        self.log(client, 'KEYS %s' % pattern)
+        return [k for k in client.table.keys() if r.match(k)]
+
+
+    # def handle_migrate(self, client, host, port, key, db, timeout, option):
+
+
+    def handle_move(self, client, key, db):
+        self.log(client, 'MOVE %s' % key)
+        if key not in client.table:
+            return 0
+        self.handle_persist(client, key)
+        if db not in self.tables:
+            self.tables[db] = self.meta.get(db,{})
+        if key in self.tables[db]:
+            return 0
+        self.tables[db][key] = client.table[key]
+        del client.table[key]
+        return 1
+
+
+    # def handle_object(self, client, subcommand, *args)
 
 
     def handle_persist(self, client, key):
@@ -275,6 +301,60 @@ class RedisServer(object):
             del self.expiries["%s %s" % (client.db,key)]
         except:
             pass
+
+
+    def handle_pexpire(self, client, key, mttl):
+        if key not in client.table:
+            return 0
+        self.expiries["%s %s" % (client.db,key)] = time.time() + (mttl*1000)
+        return 1
+
+
+    def handle_pexpireat(self, client, key, mwhen):
+        if key not in client.table:
+            return 0
+        self.expiries["%s %s" % (client.db,key)] = mwhen*1000
+        return 1
+
+
+    def handle_pttl(self, client, key):
+        self.log(client, 'PTTL %s' % key)
+        if key not in client.table:
+            return -2
+        k = "%s %s" % (client.db, key)
+        if k not in self.expiries:
+            return -1
+        return int(self.expiries[k]*1000)
+
+
+    def handle_randomkey(self, client):
+        self.log(client, 'RANDOMKEY')
+        if len(client.table):
+            return self.get(client, choice(client.table.keys()))
+        return 0
+
+
+    def handle_rename(self, client, key, newkey):
+        client.table[newkey] = client.table[key]
+        k = "%s %s" % (client.db,key)
+        # transfer TTL
+        if k in self.expiries:
+            self.expiries["%s %s" % (client.db,key)] = self.expiries[k]
+            del self.expiries[k]
+        del client.table[key]
+        self.log(client, 'RENAME %s -> %s' % (key, newkey))
+        return True
+
+
+    def handle_renamenx(self, client, key, newkey):
+        self.log(client, 'RENAMENX %s -> %s' % (key, newkey))
+        if newkey not in client.table:
+            self.handle_rename(client, key, newkey)
+            return 1
+        return 0
+
+
+    # def handle_sort(self, client, key, *args)
 
 
     def handle_ttl(self, client, key):
@@ -286,17 +366,42 @@ class RedisServer(object):
         return int(self.expiries[k])
 
 
-    def handle_flushdb(self, client):
-        self.log(client, 'FLUSHDB')
-        client.table.clear()
-        return True
+    def handle_type(self, client, key):
+        if key not in client.table:
+            return RedisMessage('none')
+
+        data = client.table[key]
+        if isinstance(data, deque):
+            return RedisMessage('list')
+        elif isinstance(data, set):
+            return RedisMessage('set')
+        elif isinstance(data, dict):
+            return RedisMessage('hash')
+        elif isinstance(data, str):
+            return RedisMessage('string')
+        else:
+            return RedisError('unknown data type')
 
 
-    def handle_flushall(self, client):
-        self.log(client, 'FLUSHALL')
-        for table in self.tables.itervalues():
-            table.clear()
-        return True
+    # def handle_scan(self, client, *args)
+
+
+    # Strings
+
+    # def handle_append(self, client, key, value)
+
+    # def handle_bitcount(self, client, key, start, end)
+    # def handle_bitop(self, client, *args)
+
+
+    def handle_decr(self, client, key):
+        self.check_ttl(client, key)
+        return self.handle_decrby(self, client, key, 1)
+
+
+    def handle_decrby(self, client, key, by):
+        self.check_ttl(client, key)
+        return self.handle_incrby(self, client, key, -by)
 
 
     def handle_get(self, client, key):
@@ -312,20 +417,22 @@ class RedisServer(object):
         return data
 
 
-    def handle_mget(self, client, keys):
-        result = []
-        for k in keys:
-            self.check_ttl(client, k)
-            data = client.table.get(k, None)
-            if isinstance(data, deque):
-                return BAD_VALUE
-            if data != None:
-                data = str(data)
-            else:
-                data = EMPTY_SCALAR
-            result.append(data)
-        self.log(client, 'MGET %s -> %s' % (keys, result))
-        return result
+    # def handle_getbit(self, client, key, offset):
+    # def handle_getrange(self, client, key, start, end):
+
+
+    def handle_getset(self, client, key, data):
+        self.handle_persist(client, key)
+        old_data = client.table.get(key, None)
+        if isinstance(old_data, deque):
+            return BAD_VALUE
+        if old_data != None:
+            old_data = str(old_data)
+        else:
+            old_data = EMPTY_SCALAR
+        client.table[key] = data
+        self.log(client, 'GETSET %s %s -> %s' % (key, data, old_data))
+        return old_data
 
 
     def handle_incr(self, client, key):
@@ -344,14 +451,64 @@ class RedisServer(object):
         return client.table[key]
 
 
-    def handle_keys(self, client, pattern):
-        r = re.compile('^' + pattern.replace('*', '.*') + '$') 
-        self.log(client, 'KEYS %s' % pattern)
-        return [k for k in client.table.keys() if r.match(k)]
+    # def handle_incrbyfloat(self, client, key, by):
 
 
-    def handle_lastsave(self, client):
-        return self.lastsave
+    def handle_mget(self, client, keys):
+        result = []
+        for k in keys:
+            self.check_ttl(client, k)
+            data = client.table.get(k, None)
+            if isinstance(data, deque):
+                return BAD_VALUE
+            if data != None:
+                data = str(data)
+            else:
+                data = EMPTY_SCALAR
+            result.append(data)
+        self.log(client, 'MGET %s -> %s' % (keys, result))
+        return result
+
+
+    # def handle_mset(self, client, *args):
+    # def handle_msetnx(self, client, *args):
+    # def handle_psetex(self, client, key, ms, value):
+
+
+    def handle_set(self, client, key, data):
+        self.handle_persist(client, key)
+        client.table[key] = data
+        self.log(client, 'SET %s -> %d' % (key, len(data)))
+        return True
+
+
+    # def handle_setbit(self, client, key, offset, value)
+    # def handle_setex(self, client, key, seconds, data)
+
+
+    def handle_setnx(self, client, key, data):
+        if key in client.table:
+            self.log(client, 'SETNX %s -> %d FAILED' % (key, len(data)))
+            return 0
+        client.table[key] = data
+        self.log(client, 'SETNX %s -> %d' % (key, len(data)))
+        return 1
+
+
+    # def handle_setrange(self, client, key, offset, value)
+    # def handle_strlen(self, client, key)
+
+
+    # Hashes
+
+    # Lists
+
+    # def handle_blpop(self, client, *args)
+    # def handle_brpop(self, client, *args)
+    # def handle_brpoplpush(self, client, *args)
+
+    # def handle_lindex(self, client, key, index)
+    # def handle_linsert(self, client, key, *args)
 
 
     def handle_llen(self, client, key):
@@ -388,23 +545,26 @@ class RedisServer(object):
         return True
 
 
-    def handle_lrange(self, client, key, low, high):
+    # def handle_lpushx(self, client, key, data):
+
+
+    def handle_lrange(self, client, key, start, stop):
         self.check_ttl(client, key)
-        low, high = int(low), int(high)
-        if low == 0 and high == -1:
-            high = None
+        start, stop = int(start), int(stop)
+        if start == 0 and stop == -1:
+            stop = None
         if key not in client.table:
             return EMPTY_LIST
         if not isinstance(client.table[key], deque):
             return BAD_VALUE
-        l = list(client.table[key])[low:high]
-        self.log(client, 'LRANGE %s %s %s -> %s' % (key, low, high, l))
+        l = list(client.table[key])[start:stop]
+        self.log(client, 'LRANGE %s %s %s -> %s' % (key, start, stop, l))
         return l
 
 
-    def handle_ping(self, client):
-        self.log(client, 'PING -> PONG')
-        return RedisMessage('PONG')
+    # def handle_lrem(self, client, key, start, stop):
+    # def handle_lset(self, client, key, index, value):
+    # def handle_ltrim(self, client, key, start, stop):
 
 
     def handle_rpop(self, client, key):
@@ -421,6 +581,9 @@ class RedisServer(object):
         return data
 
 
+    # def handle_rpoplpush(self, source, destination)
+
+
     def handle_rpush(self, client, key, data):
         self.check_ttl(client, key)
         if key not in client.table:
@@ -432,21 +595,41 @@ class RedisServer(object):
         return True
 
 
-    def handle_type(self, client, key):
-        if key not in client.table:
-            return RedisMessage('none')
+    # def handle_rpushx(self, client, key, data)
 
-        data = client.table[key]
-        if isinstance(data, deque):
-            return RedisMessage('list')
-        elif isinstance(data, set):
-            return RedisMessage('set')
-        elif isinstance(data, dict):
-            return RedisMessage('hash')
-        elif isinstance(data, str):
-            return RedisMessage('string')
+
+    def handle_bgsave(self, client):
+        if hasattr(os, 'fork'):
+            if not os.fork():
+                self.save()
+                sys.exit(0)
         else:
-            return RedisError('unknown data type')
+            self.save()
+        self.log(client, 'BGSAVE')
+        return RedisMessage('Background saving started')
+
+
+    def handle_flushdb(self, client):
+        self.log(client, 'FLUSHDB')
+        client.table.clear()
+        return True
+
+
+    def handle_flushall(self, client):
+        self.log(client, 'FLUSHALL')
+        for table in self.tables.itervalues():
+            table.clear()
+        return True
+
+
+    def handle_lastsave(self, client):
+        return self.lastsave
+
+
+
+    def handle_ping(self, client):
+        self.log(client, 'PING -> PONG')
+        return RedisMessage('PONG')
 
 
     def handle_quit(self, client):
@@ -468,55 +651,6 @@ class RedisServer(object):
         self.select(client, db)
         self.log(client, 'SELECT %s' % db)
         return True
-
-
-    def handle_set(self, client, key, data):
-        self.handle_persist(client, key)
-        client.table[key] = data
-        self.log(client, 'SET %s -> %d' % (key, len(data)))
-        return True
-
-
-    def handle_setnx(self, client, key, data):
-        if key in client.table:
-            self.log(client, 'SETNX %s -> %d FAILED' % (key, len(data)))
-            return 0
-        client.table[key] = data
-        self.log(client, 'SETNX %s -> %d' % (key, len(data)))
-        return 1
-    
-
-    def handle_getset(self, client, key, data):
-        self.handle_persist(client, key)
-        old_data = client.table.get(key, None)
-        if isinstance(old_data, deque):
-            return BAD_VALUE
-        if old_data != None:
-            old_data = str(old_data)
-        else:
-            old_data = EMPTY_SCALAR
-        client.table[key] = data
-        self.log(client, 'GETSET %s %s -> %s' % (key, data, old_data))
-        return old_data
-
-
-    def handle_rename(self, client, key, newkey):
-        client.table[newkey] = client.table[key]
-        k = "%s %s" % (client.db,key)
-        # transfer TTL
-        if k in self.expiries:
-            self.expiries["%s %s" % (client.db,key)] = self.expiries[k]
-            del self.expiries[k]
-        del client.table[key]
-        self.log(client, 'RENAME %s -> %s' % (key, newkey))
-        return True
-
-
-    def check_ttl(self, client, key):
-        k = "%s %s" % (client.db,key)
-        if k in self.expiries:
-            if self.expiries[k] <= time.time():
-                self.handle_del(client, key)
 
 
     def handle_publish(self, client, channel, message):
