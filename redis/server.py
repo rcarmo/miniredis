@@ -241,6 +241,16 @@ class RedisServer(object):
         return key in client.table
 
 
+    def handle_expire(self, client, key, ttl):
+        self.expiries["%s %s" % (client.db,key)] = time.time() + ttl
+        return 1
+
+
+    def handle_expireat(self, client, key, when):
+        self.expiries["%s %s" % (client.db,key)] = when
+        return 1
+
+
     def handle_decr(self, client, key):
         self.check_ttl(client, key)
         return self.handle_decrby(self, client, key, 1)
@@ -265,16 +275,6 @@ class RedisServer(object):
             del self.expiries["%s %s" % (client.db,key)]
         except:
             pass
-
-
-    def handle_expire(self, client, key, ttl):
-        self.expiries["%s %s" % (client.db,key)] = time.time() + ttl
-        return 1
-
-
-    def handle_expireat(self, client, key, when):
-        self.expiries["%s %s" % (client.db,key)] = when
-        return 1
 
 
     def handle_ttl(self, client, key):
