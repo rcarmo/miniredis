@@ -55,7 +55,7 @@ EMPTY_LIST = RedisConstant('EmptyList')
 BAD_VALUE = RedisError('Operation against a key holding the wrong kind of value')
 
 
-class RedisClient(object):
+class RedisConnection(object):
     """Class to represent a client connection"""
     def __init__(self, socket):
         self.socket = socket
@@ -141,7 +141,7 @@ class RedisServer(object):
 
     def gevent_handler(self, client_socket, address):
         """gevent Streamserver handler"""
-        client = RedisClient(client_socket)
+        client = RedisConnection(client_socket)
         self.clients[client_socket] = client
         self.log(client, 'client connected')
         self.select(client,0)
@@ -180,7 +180,7 @@ class RedisServer(object):
             for sock in readable:
                 if sock == server:
                     (client_socket, address) = server.accept()
-                    client = RedisClient(client_socket)
+                    client = RedisConnection(client_socket)
                     self.clients[client_socket] = client
                     self.log(client, 'client connected')
                     self.select(client, 0)
@@ -706,7 +706,7 @@ class ThreadedRedisServer(RedisServer):
         super(ThreadedRedisServer, self).__init__(*kwargs)
 
     def thread(self, sock, address):
-        client = RedisClient(sock)
+        client = RedisConnection(sock)
         self.clients[sock] = client
         self.log(client, 'client connected')
         self.select(client,0)
