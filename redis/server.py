@@ -340,9 +340,9 @@ class RedisServer(object):
 
 
     def handle_keys(self, client, pattern):
-        r = re.compile(pattern.replace('*', '.*'))
+        r = re.compile('^' + pattern.replace('*', '.*') + '$') 
         self.log(client, 'KEYS %s' % pattern)
-        return [k for k in client.table.keys() if r.search(k)]
+        return [k for k in client.table.keys() if r.match(k)]
 
 
     def handle_lastsave(self, client):
