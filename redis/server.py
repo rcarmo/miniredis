@@ -77,7 +77,7 @@ class RedisServer(object):
         self.lastsave = int(time.time())
         self.path = db_path
         self.meta = Haystack(self.path,'redisdb')
-        self.expiries = self.meta.get('expiries',{})
+        self.timeouts = self.meta.get('timeouts',{})
 
 
     def dump(self, client, o):
@@ -120,7 +120,7 @@ class RedisServer(object):
         """Handle commands"""
 
         # check 25% of keys, like "real" Redis
-        for e in [k for k in sample(self.expiries.keys(), len(self.expiries.keys())/4)]:
+        for e in [k for k in sample(self.timeouts.keys(), len(self.timeouts.keys())/4)]:
             self.check_ttl(client, e)
 
         line = client.rfile.readline()
@@ -204,7 +204,7 @@ class RedisServer(object):
 
     def save(self):
         """Serialize tables to disk"""
-        self.meta['expiries'] = self.expiries
+        self.meta['timeouts'] = self.timeouts
         for db in self.tables:
             self.meta[db] = self.tables[db]
         self.meta.commit()
@@ -227,8 +227,8 @@ class RedisServer(object):
 
     def check_ttl(self, client, key):
         k = "%s %s" % (client.db,key)
-        if k in self.expiries:
-            if self.expiries[k] <= time.time():
+        if k in self.timeouts:
+            if self.timeouts[k] <= time.time():
                 self.handle_del(client, key)
 
 
@@ -259,14 +259,14 @@ class RedisServer(object):
     def handle_expire(self, client, key, ttl):
         if key not in client.table:
             return 0
-        self.expiries["%s %s" % (client.db,key)] = time.time() + ttl
+        self.timeouts["%s %s" % (client.db,key)] = time.time() + ttl
         return 1
 
 
     def handle_expireat(self, client, key, when):
         if key not in client.table:
             return 0
-        self.expiries["%s %s" % (client.db,key)] = when
+        self.timeouts["%s %s" % (client.db,key)] = when
         return 1
 
 
@@ -298,7 +298,7 @@ class RedisServer(object):
 
     def handle_persist(self, client, key):
         try:
-            del self.expiries["%s %s" % (client.db,key)]
+            del self.timeouts["%s %s" % (client.db,key)]
         except:
             pass
 
@@ -306,14 +306,14 @@ class RedisServer(object):
     def handle_pexpire(self, client, key, mttl):
         if key not in client.table:
             return 0
-        self.expiries["%s %s" % (client.db,key)] = time.time() + (mttl*1000)
+        self.timeouts["%s %s" % (client.db,key)] = time.time() + (mttl*1000)
         return 1
 
 
     def handle_pexpireat(self, client, key, mwhen):
         if key not in client.table:
             return 0
-        self.expiries["%s %s" % (client.db,key)] = mwhen*1000
+        self.timeouts["%s %s" % (client.db,key)] = mwhen*1000
         return 1
 
 
@@ -322,9 +322,9 @@ class RedisServer(object):
         if key not in client.table:
             return -2
         k = "%s %s" % (client.db, key)
-        if k not in self.expiries:
+        if k not in self.timeouts:
             return -1
-        return int(self.expiries[k]*1000)
+        return int(self.timeouts[k]*1000)
 
 
     def handle_randomkey(self, client):
@@ -338,9 +338,9 @@ class RedisServer(object):
         client.table[newkey] = client.table[key]
         k = "%s %s" % (client.db,key)
         # transfer TTL
-        if k in self.expiries:
-            self.expiries["%s %s" % (client.db,key)] = self.expiries[k]
-            del self.expiries[k]
+        if k in self.timeouts:
+            self.timeouts["%s %s" % (client.db,key)] = self.timeouts[k]
+            del self.timeouts[k]
         del client.table[key]
         self.log(client, 'RENAME %s -> %s' % (key, newkey))
         return True
@@ -361,9 +361,9 @@ class RedisServer(object):
         if key not in client.table:
             return -2
         k = "%s %s" % (client.db, key)
-        if k not in self.expiries:
+        if k not in self.timeouts:
             return -1
-        return int(self.expiries[k])
+        return int(self.timeouts[k])
 
 
     def handle_type(self, client, key):
