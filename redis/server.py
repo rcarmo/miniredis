@@ -236,6 +236,11 @@ class RedisServer(object):
         return RedisMessage('Background saving started')
 
 
+    def handle_exists(self, client, key):
+        self.check_ttl(client, key)
+        return key in client.table
+
+
     def handle_decr(self, client, key):
         self.check_ttl(client, key)
         return self.handle_decrby(self, client, key, 1)
