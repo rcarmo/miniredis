@@ -6,7 +6,7 @@ Published under the MIT license.
 """
 
 import os, sys, logging
-from redis.server import RedisServer
+from miniredis.server import RedisServer
 
 #logging.basicConfig(level=logging.DEBUG)
 

@@ -41,12 +41,12 @@ def makeExtension(extName):
         libraries = [],
     )    
 
-extNames = scandir("redis")
+extNames = scandir("miniredis")
 extensions = [makeExtension(name) for name in extNames]
 
 setup(
-    name = "redis",
-    packages = "redis",
+    name = "miniredis",
+    packages = "miniredis",
     ext_modules=extensions,
     cmdclass = {'build_ext': build_ext},
 )

@@ -9,7 +9,7 @@ Published under the MIT license.
 
 from __future__ import with_statement
 from collections import deque
-import os, sys, time, logging, signal, getopt
+import os, sys, time, logging, signal, getopt, re
 import socket, select, thread, errno
 from random import sample, choice
 

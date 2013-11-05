@@ -6,7 +6,7 @@ Published under the MIT license.
 """
 
 import os, sys, logging
-from redis.client import RedisClient
+from miniredis.client import RedisClient
 from multiprocessing import Pool
 import time
 import random
