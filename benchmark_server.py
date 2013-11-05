@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
 """
-Based on a minimalist Redis server originally written by Benjamin Pollack
-
 First modified by Rui Carmo on 2013-03-12
 Published under the MIT license.
 """

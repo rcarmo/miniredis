@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
 """
-Based on a minimalist Redis client originally written by Andrew Rowls
-
 Created by Rui Carmo on 2013-03-12
 Published under the MIT license.
 """
@@ -29,5 +27,5 @@ if __name__=='__main__':
         return count/(time.time() - now)
 
     p = Pool(4)
-    print sum(p.map(timed,[10000,10000,10000,10000]))
+    print sum(p.map(timed,[25000,25000,25000,25000]))
     #print timed(10000)
