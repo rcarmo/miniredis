@@ -598,6 +598,89 @@ class RedisServer(object):
     # def handle_rpushx(self, client, key, data)
 
 
+    # Hashes (TODO: add type checks)
+
+    def handle_hdel(self, client, key, *keys):
+        self.check_ttl(client, key)
+        return len(map(client.table[key].pop, keys))
+
+
+    def handle_hexists(self, client, key, field):
+        self.check_ttl(client, key)
+        return field in client.table[key]
+
+
+    def handle_hget(self, client, key, field):
+        self.check_ttl(client, key)
+        return client.table[key][field] if field in client.table[key] else None 
+
+
+    def handle_hgetall(self, client, key):
+        self.check_ttl(client, key)
+        return client.table[key]
+
+
+    def handle_hincrby(self, client, key, field, increment):
+        if key not in client.table:
+            client.table[key] = {}
+        prev = long(client.table[key].get(field, '0'))
+
+        client.table[key][field] = str(prev + increment)
+        return client.table[key][field]
+
+
+    # def handle_hincrbyfloat(self, client, key, field, increment):
+
+
+    def handle_hkeys(self, client, key):
+        if key not in client.table:
+            return []
+        return client.table[key].keys()
+
+
+    def handle_hlen(self, client, key):
+        self.check_ttl(client, key)
+        return len(client.table[key])
+
+
+    def handle_hmget(self, client, key, fields):
+        self.check_ttl(client, key)
+        return [client.table[key].get(f) for f in fields]
+
+
+    def handle_hmset(self, client, key, items):
+        self.check_ttl(client, key)
+        for k, v in items.items():
+            client[key][k] = v
+        return True
+
+
+    def handle_hset(self, client, key, field, value):
+        self.check_ttl(client, key)
+        if key not in client.table:
+            client.table[key] = {}
+        if field not in client.table[key]:
+            client.table[key][field] = value
+            return 1
+        client.table[key][field] = value
+        return 0
+
+
+    # def handle_hsetnx(self, client, key, field, value)
+
+
+    def handle_hvals(self, client, key):
+        if key not in client.table:
+            return []
+        return client.table[key].values()
+
+
+    # def hscan(self, client, key, cursor, *args)
+
+
+
+    # Server
+
     def handle_bgsave(self, client):
         if hasattr(os, 'fork'):
             if not os.fork():
@@ -652,6 +735,8 @@ class RedisServer(object):
         self.log(client, 'SELECT %s' % db)
         return True
 
+
+    # PubSub
 
     def handle_publish(self, client, channel, message):
         for p in self.channels.keys():
