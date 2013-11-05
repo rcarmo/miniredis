@@ -236,13 +236,16 @@ class RedisServer(object):
 
     # Keys
 
-    def handle_del(self, client, key):
-        self.handle_persist(client, key)
-        self.log(client, 'DEL %s' % key)
-        if key not in client.table:
-            return 0
-        del client.table[key]
-        return 1
+    def handle_del(self, client, *args):
+        count = 0
+        for key in args:
+            self.handle_persist(client, key)
+            self.log(client, 'DEL %s' % key)
+            if key not in client.table:
+                continue
+            del client.table[key]
+            count += 1
+        return count
 
 
     def handle_dump(self, client, key):
