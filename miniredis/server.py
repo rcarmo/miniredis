@@ -256,7 +256,9 @@ class RedisServer(object):
 
     def handle_exists(self, client, key):
         self.check_ttl(client, key)
-        return key in client.table
+        if key in client.table:
+            return 1
+        return 0
 
 
     def handle_expire(self, client, key, ttl):
