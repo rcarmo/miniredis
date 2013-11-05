@@ -786,6 +786,19 @@ class RedisServer(object):
 
 
 class ThreadedRedisServer(RedisServer):
+    """
+    # for use in an accept() loop:
+    import thread, socket
+    sock = socket(AF_INET, SOCK_STREAM)
+    sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+    sock.bind(('127.0.0.1', port=6379))
+    serversock.listen(5)
+    t = ThreadedRedisServer()
+    while True:
+        clientsock, addr = sock.accept()
+        thread.start_new_thread(t.thread, (clientsock, addr))
+    """
+
 
     def __init__(self, **kwargs):
         super(ThreadedRedisServer, self).__init__(*kwargs)
@@ -806,7 +819,22 @@ class ThreadedRedisServer(RedisServer):
         except Exception, e:
             log.debug(">>> %s" % e)
             pass
-        
+
+
+def fork(**kwargs):
+    try:
+        pid = os.fork()
+        if pid > 0:
+            return pid
+        m = RedisServer(*kwargs)
+        m.run()
+    except KeyboardInterrupt:
+        m.stop()
+        sys.exit(0)
+    except OSError, e:
+        print >> sys.stderr, "Failed to launch Redis subprocess: %d (%s)" % (e.errno, e.strerror)
+        sys.exit(1)
+
 
 def main(args):
     if os.name == 'posix':

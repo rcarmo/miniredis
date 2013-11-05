@@ -49,5 +49,7 @@ setup(
     packages = "miniredis",
     ext_modules=extensions,
     cmdclass = {'build_ext': build_ext},
+    setup_requires=['nose'],
+    test_suite='nose.main',
 )
 
