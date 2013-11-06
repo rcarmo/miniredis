@@ -48,8 +48,11 @@ def test_exists():
 
 
 def test_expires():
-	eq_(r.expire('test:key'), 2)
-	time.sleep(1)
-	eq_(r.exists('test:key'), 1)
-	time.sleep(1)
-	eq_(r.exists('test:key'), 0)
+	# missing key
+	eq_(r.expire('test:notthere', 2), 0)
+	# valid setting
+	eq_(r.expire('test:key', 2), 1)
+	eq_(r.ttl('test:key'), 2)
+	# reset ttl
+	eq_(r.set('test:key','value'), 'OK')
+	eq_(r.ttl('test:key'), -1)

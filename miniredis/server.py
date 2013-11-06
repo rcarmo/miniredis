@@ -262,6 +262,8 @@ class RedisServer(object):
 
 
     def handle_expire(self, client, key, ttl):
+        ttl = int(ttl)
+        self.log(client, 'EXPIRE %s %d' % (key, ttl))
         if key not in client.table:
             return 0
         self.timeouts["%s %s" % (client.db,key)] = time.time() + ttl
@@ -368,7 +370,7 @@ class RedisServer(object):
         k = "%s %s" % (client.db, key)
         if k not in self.timeouts:
             return -1
-        return int(self.timeouts[k])
+        return int(self.timeouts[k] - time.time() + 0.1)
 
 
     def handle_type(self, client, key):
