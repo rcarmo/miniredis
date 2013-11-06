@@ -46,8 +46,7 @@ def test_exists():
 	eq_(r.exists('test:key'), 1)
 	eq_(r.exists('test:notthere'), 0)
 
-
-def test_expires():
+def test_expire():
 	# missing key
 	eq_(r.expire('test:notthere', 2), 0)
 	# valid setting
