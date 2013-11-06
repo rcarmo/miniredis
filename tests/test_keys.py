@@ -45,3 +45,11 @@ def test_dump():
 def test_exists():
 	eq_(r.exists('test:key'), 1)
 	eq_(r.exists('test:notthere'), 0)
+
+
+def test_expires():
+	eq_(r.expire('test:key'), 2)
+	time.sleep(1)
+	eq_(r.exists('test:key'), 1)
+	time.sleep(1)
+	eq_(r.exists('test:key'), 0)
