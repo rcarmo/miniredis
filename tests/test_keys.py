@@ -55,3 +55,16 @@ def test_expire():
 	# reset ttl
 	eq_(r.set('test:key','value'), 'OK')
 	eq_(r.ttl('test:key'), -1)
+
+def test_expireat():
+	# missing key
+	at = int(time.time() + 2)
+	eq_(r.expireat('test:notthere', at), 0)
+	# valid setting
+	at = int(time.time() + 2)
+	eq_(r.expireat('test:key', at), 1)
+	eq_(r.ttl('test:key'), 2)
+	# reset ttl
+	eq_(r.set('test:key','value'), 'OK')
+	eq_(r.ttl('test:key'), -1)
+

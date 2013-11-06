@@ -271,6 +271,8 @@ class RedisServer(object):
 
 
     def handle_expireat(self, client, key, when):
+        when = int(when)
+        self.log(client, 'EXPIREAT %s %d' % (key, when))
         if key not in client.table:
             return 0
         self.timeouts["%s %s" % (client.db,key)] = when
