@@ -10,11 +10,11 @@ pid = None
 r = None
 
 def setup_module(module):
-	global pid, r
-	pid = miniredis.server.fork()
-	print("Launched server with pid %d." % pid)
-	time.sleep(1)
-	r = RedisClient()
+    global pid, r
+    pid = miniredis.server.fork()
+    print("Launched server with pid %d." % pid)
+    time.sleep(1)
+    r = RedisClient()
 
 def teardown_module(module):
 	global pid
@@ -66,4 +66,9 @@ def test_expireat():
 	# reset ttl
 	eq_(r.set('test:key','value'), 'OK')
 	eq_(r.ttl('test:key'), -1)
+
+def test_keys():
+    # place a test key
+    eq_(r.set('test:key','value'), 'OK')
+    eq_(r.keys('*:key'), ['test:key'])
 
