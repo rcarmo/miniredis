@@ -397,7 +397,18 @@ class RedisServer(object):
 
     # Strings
 
-    # def handle_append(self, client, key, value)
+    def handle_append(self, client, key, value):
+        if key not in client.table:
+            self.handle_set(client, key, value)
+            return len(client.table[key])
+        data = client.table[key]
+        if isinstance(data, str):
+            self.handle_persist(client, key)
+            client.table[key] += value
+            self.log(client, 'APPEND %s -> %d' % (key, len(client.table[key])))
+            return len(client.table[key])
+        return BAD_VALUE
+
 
     # def handle_bitcount(self, client, key, start, end)
     # def handle_bitop(self, client, *args)
