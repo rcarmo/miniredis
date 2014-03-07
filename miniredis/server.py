@@ -102,6 +102,11 @@ class RedisServer(object):
                 self.dump(client, str(val))
         elif isinstance(o, RedisMessage):
             client.wfile.write('%s\r\n' % o)
+        elif isinstance(o, dict):
+            client.wfile.write('*' + str(len(o)*2) + nl)
+            for k in o.keys():
+                self.dump(client, str(k))
+                self.dump(client, str(o[k]))
         else:
             client.wfile.write('return type not yet implemented\r\n')
         client.wfile.flush()
@@ -503,7 +508,11 @@ class RedisServer(object):
 
 
     # def handle_setbit(self, client, key, offset, value)
-    # def handle_setex(self, client, key, seconds, data)
+
+
+    def handle_setex(self, client, key, seconds, data):
+        self.handle_set(client, key, data)
+        return self.handle_expire(client, key, seconds)
 
 
     def handle_setnx(self, client, key, data):
@@ -621,23 +630,32 @@ class RedisServer(object):
     # Hashes (TODO: add type checks)
 
     def handle_hdel(self, client, key, *keys):
+        if key not in client.table:
+            return 0
         self.check_ttl(client, key)
         return len(map(client.table[key].pop, keys))
 
 
     def handle_hexists(self, client, key, field):
+        if key not in client.table:
+            return 0
         self.check_ttl(client, key)
         return field in client.table[key]
 
 
     def handle_hget(self, client, key, field):
+        if key not in client.table:
+            return 0
         self.check_ttl(client, key)
         return client.table[key][field] if field in client.table[key] else None 
 
 
     def handle_hgetall(self, client, key):
         self.check_ttl(client, key)
-        return client.table[key]
+        try:
+            return client.table[key]
+        except:
+            return []
 
 
     def handle_hincrby(self, client, key, field, increment):
