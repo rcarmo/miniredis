@@ -27,15 +27,6 @@ log = logging.getLogger()
 
 from .haystack import Haystack
 
-# Optional gevent import
-try:
-    import gevent
-    import gevent.server
-
-    GEVENT_AVAILABLE = True
-except ImportError:
-    GEVENT_AVAILABLE = False
-
 
 class RedisConstant:
     def __init__(self, type: str) -> None:
@@ -205,28 +196,6 @@ class RedisServer:
         else:
             self.dump(client, RedisError(f"unknown command '{command}'"))
 
-    def gevent_handler(
-        self, client_socket: socket.socket, address: Tuple[str, int]
-    ) -> None:
-        """gevent Streamserver handler"""
-        if not GEVENT_AVAILABLE:
-            self.log(None, "gevent not available, cannot use gevent_handler")
-            return
-        client = RedisConnection(client_socket)
-        self.clients[client_socket] = client
-        self.log(client, "client connected")
-        self.select(client, 0)
-        self.log(client, "Entering loop.")
-        while not self.halt:
-            self.log(client, "Handling...")
-            try:
-                self.handle(client)
-            except Exception as e:
-                self.log(client, f"exception: {e}")
-                break
-        self.handle_quit(client)
-        self.log(client, "exiting handler")
-
     def rotate(self) -> None:
         """Rotate log file using context manager for better resource handling"""
         try:
@@ -292,15 +261,6 @@ class RedisServer:
                     pass
             self.clients.clear()
             server.close()
-
-    def run_gevent(self) -> None:
-        """Main loop for gevent handling"""
-        if not GEVENT_AVAILABLE:
-            self.log(None, "gevent not available, cannot use run_gevent")
-            self.run()
-            return
-        server = gevent.server.StreamServer((self.host, self.port), self.gevent_handler)
-        server.serve_forever()
 
     def save(self) -> None:
         """Serialize tables to disk"""
