@@ -327,11 +327,20 @@ class RedisServer:
         self.log(client, f"EXPIREAT {key} {when}")
         if key not in client.table:
             return 0
-        self.timeouts[f"{client.db} {key}"] = when
+        # Store as a Unix timestamp
+        self.timeouts[f"{client.db} {key}"] = float(when)
         return 1
 
     def handle_keys(self, client, pattern):
-        r = re.compile("^" + pattern.replace("*", ".*") + "$")
+        """Return all keys matching a pattern"""
+        # Replace Redis glob patterns with Python regex patterns
+        regex_pattern = "^" + pattern
+        # Replace Redis wildcards with regex equivalents
+        regex_pattern = regex_pattern.replace("*", ".*")
+        regex_pattern = regex_pattern.replace("?", ".")
+        regex_pattern += "$"  # Anchor the end
+        
+        r = re.compile(regex_pattern)
         self.log(client, f"KEYS {pattern}")
         return [k for k in client.table.keys() if r.match(k)]
 
@@ -373,13 +382,27 @@ class RedisServer:
         return 1
 
     def handle_pttl(self, client, key):
+        """Get the time to live for a key in milliseconds"""
         self.log(client, f"PTTL {key}")
+        # First check if key exists at all
         if key not in client.table:
             return -2
+        
+        # Check if the key has a timeout
         k = f"{client.db} {key}"
         if k not in self.timeouts:
             return -1
-        return int(self.timeouts[k] * 1000)
+        
+        # Check if key has expired
+        remaining_time = self.timeouts[k] - time.time()
+        if remaining_time <= 0:
+            # The key has expired, remove it and return -2
+            del client.table[key]
+            del self.timeouts[k]
+            return -2
+            
+        # Convert seconds to milliseconds
+        return int(remaining_time * 1000)
 
     def handle_randomkey(self, client):
         self.log(client, "RANDOMKEY")
@@ -408,12 +431,22 @@ class RedisServer:
     # def handle_sort(self, client, key, *args)
 
     def handle_ttl(self, client, key):
+        """Get the time to live for a key in seconds"""
+        # First check if key exists at all
         if key not in client.table:
             return -2
+            
+        # Check if key has expired
         k = f"{client.db} {key}"
-        if k not in self.timeouts:
-            return -1
-        return int(self.timeouts[k] - time.time() + 0.1)
+        if k in self.timeouts:
+            remaining_time = self.timeouts[k] - time.time()
+            if remaining_time <= 0:
+                # The key has expired, remove it and return -2
+                del client.table[key]
+                del self.timeouts[k]
+                return -2
+            return int(remaining_time + 0.1)  # Add small buffer to avoid truncation issues
+        return -1  # Key exists but has no expiration
 
     def handle_type(self, client, key):
         if key not in client.table:
@@ -491,30 +524,53 @@ class RedisServer:
         return self.handle_incrby(client, key, 1)
 
     def handle_incrby(self, client, key, by):
+        """Increment key by specified value, properly handling nonexistent keys"""
         self.check_ttl(client, key)
         try:
-            client.table[key] = int(client.table[key])
-            client.table[key] += int(by)
-        except (KeyError, TypeError, ValueError):
-            client.table[key] = 1
-        self.log(client, f"INCRBY {key} {by} -> {client.table[key]}")
-        return client.table[key]
+            by = int(by)  # Make sure by is a valid integer
+            
+            # If key exists, make sure it's an integer
+            if key in client.table:
+                try:
+                    # Try to convert current value to int
+                    current_value = int(client.table[key])
+                except (TypeError, ValueError):
+                    # Current value is not an integer, raise proper Redis error
+                    return RedisError("value is not an integer")
+                    
+                # Value is a valid integer, proceed with increment
+                client.table[key] = current_value + by
+            else:
+                # Key doesn't exist, set to the increment value
+                client.table[key] = by
+                
+            self.log(client, f"INCRBY {key} {by} -> {client.table[key]}")
+            return client.table[key]
+            
+        except (TypeError, ValueError):
+            # By argument is not a valid integer
+            return RedisError("value is not an integer or out of range")
 
     # def handle_incrbyfloat(self, client, key, by):
 
     def handle_mget(self, client, *keys):
+        """Multi-get - return values for multiple keys"""
         result = []
         for k in keys:
             self.check_ttl(client, k)
+            if k not in client.table:
+                result.append(None)  # Return None for non-existent keys
+                continue
+                
             data = client.table.get(k, None)
-            if isinstance(data, deque):
-                return BAD_VALUE
-            if data is not None:
-                data = str(data)
-            else:
-                data = EMPTY_SCALAR
-            result.append(data)
-        self.log(client, f"MGET {keys} -> {result}")
+            # Skip non-string values, returning None
+            if not isinstance(data, str):
+                result.append(None)
+                continue
+                
+            result.append(str(data))
+            
+        self.log(client, f"MGET {keys} -> {len(result)} values")
         return result
 
     # def handle_mset(self, client, *args):
@@ -530,8 +586,21 @@ class RedisServer:
     # def handle_setbit(self, client, key, offset, value)
 
     def handle_setex(self, client, key, seconds, data):
+        """Set the value and expiration of a key"""
+        # Validate seconds parameter is a valid integer
+        try:
+            seconds = int(seconds)
+            if seconds <= 0:
+                return RedisError("invalid expire time in 'setex' command")
+        except (ValueError, TypeError):
+            return RedisError("value is not an integer or out of range")
+            
+        # First set the key value
         self.handle_set(client, key, data)
-        return self.handle_expire(client, key, seconds)
+        # Then set expiration
+        self.handle_expire(client, key, seconds)
+        # Return OK to match Redis standard
+        return RedisMessage("OK")
 
     def handle_setnx(self, client, key, data):
         if key in client.table:

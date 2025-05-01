@@ -6,15 +6,15 @@ import pytest # Changed from unittest
 from multiprocessing import Process
 from typing import Generator, Any
 
-# Import from shared helper
-from .helpers import start_server, stop_server
+# Changed from relative import to absolute import
+from tests.helpers import start_server, stop_server
 from miniredis.client import RedisClient
 
 # Use the same fixture as test_keys.py if tests can share the same server instance
 # If they need independent servers, define a similar fixture here or adjust scope.
 # For simplicity, let's assume they can share the module-scoped server.
 # If you defined the fixture in conftest.py, you wouldn't need to import it here.
-from .test_keys import redis_client # Reuse fixture from test_keys
+from tests.test_keys import redis_client # Changed to absolute import
 
 # No longer need unittest.TestCase
 class TestStringCommands:

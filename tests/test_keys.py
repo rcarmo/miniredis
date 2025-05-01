@@ -6,8 +6,8 @@ import pytest
 from multiprocessing import Process
 from typing import Generator
 
-# Import from shared helper
-from .helpers import start_server, stop_server
+# Changed from relative import to absolute import
+from tests.helpers import start_server, stop_server
 from miniredis.client import RedisClient
 
 @pytest.fixture(scope="module")
