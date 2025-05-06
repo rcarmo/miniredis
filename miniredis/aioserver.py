@@ -79,6 +79,8 @@ class AsyncRedisServer:
         self.lastsave = int(time.time())
         # Channels for PubSub
         self.channels: Dict[str, List[AsyncRedisConnection]] = {}
+        # Track client connections by peername
+        self.client_connections: Dict[str, AsyncRedisConnection] = {}
         # Load initial data
         self._load_data()
         log.info(f"AsyncRedisServer initialized for {host}:{port}, DB path: {self.path}")
@@ -144,6 +146,9 @@ class AsyncRedisServer:
         if isinstance(value, bytes):
             return f"${len(value)}\r\n".encode() + value + b"\r\n"
         elif isinstance(value, str):
+            # Special handling for "OK" responses - use simple string format
+            if value == "OK":
+                return b"+OK\r\n"
             encoded_value = value.encode()
             return f"${len(encoded_value)}\r\n".encode() + encoded_value + b"\r\n"
         elif isinstance(value, int):
@@ -157,8 +162,8 @@ class AsyncRedisServer:
         elif isinstance(value, list):
              encoded_items = b"".join([await self._encode_response(item) for item in value])
              return f"*{len(value)}\r\n".encode() + encoded_items
-        elif isinstance(value, bool): # Simple OK for True
-             return b"+OK\r\n" if value else b"$-1\r\n" # Or Null Bulk String for False? Adjust as needed.
+        elif isinstance(value, bool): # Convert bool to integer (1=True, 0=False) for Redis protocol
+             return f":{1 if value else 0}\r\n".encode()
         else:
             # Fallback for unknown types
             log.warning(f"Encoding unknown type: {type(value)}")
@@ -168,120 +173,154 @@ class AsyncRedisServer:
         """Handles a single client connection."""
         peername = writer.get_extra_info('peername')
         connection = AsyncRedisConnection(reader=reader, writer=writer)
-        log.info(f"Client connected: {peername} (DB {connection.db})")
+        connection_key = str(peername) if peername else f"anon-{id(connection)}"
+        
+        log.info(f"Client connected: {connection_key} (DB {connection.db})")
         task = asyncio.current_task()
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        
+        # Store connection in the task for command handlers to access
+        setattr(task, 'connection', connection)
+
+        # Track the client connection with peername as key
+        self.client_connections[connection_key] = connection
+        log.info(f"Added client connection {connection_key} to tracking")
 
         # Ensure the client's selected DB exists
         if connection.db not in self.tables:
             self.tables[connection.db] = {}
-        # Get the table for the current connection's DB
-        current_table = self.tables[connection.db]
 
-        while True:
-            try:
-                # 1. Read the command type and count
-                line = await reader.readline()
-                if not line or line == b'': # Connection closed
-                    log.info(f"Client disconnected: {peername}")
-                    break
-                if not line.startswith(b'*'):
-                    writer.write(str(RedisError("Protocol error: expected array")).encode())
-                    await writer.drain()
-                    continue
-
-                try:
-                    item_count = int(line[1:].strip())
-                except ValueError:
-                    writer.write(str(RedisError("Protocol error: invalid array length")).encode())
-                    await writer.drain()
-                    continue
-
-                # 2. Read command arguments
-                args: List[bytes] = []
-                for _ in range(item_count):
-                    # Read bulk string length
-                    len_line = await reader.readline()
-                    if not len_line or not len_line.startswith(b'$'):
-                        raise RedisError("Protocol error: expected bulk string length")
-                    try:
-                        length = int(len_line[1:].strip())
-                    except ValueError:
-                         raise RedisError("Protocol error: invalid bulk string length")
-
-                    if length == -1:
-                        args.append(b"") # Represent null bulk string as empty bytes for simplicity here
-                    else:
-                        # Read bulk string data + CRLF
-                        data = await reader.readexactly(length + 2)
-                        if data[-2:] != b'\r\n':
-                            raise RedisError("Protocol error: expected CRLF after bulk string")
-                        args.append(data[:-2])
-
-                if not args:
-                    continue # Should not happen if item_count > 0
-
-                # 3. Decode command and dispatch
-                command = args[0].decode().lower()
-                decoded_args = [arg.decode() for arg in args[1:]] # Decode remaining args
-
-                handler_name = f"handle_{command}"
-                response: Any
-                if hasattr(self, handler_name):
-                    handler = getattr(self, handler_name)
-                    # Pass connection state and current table if needed
-                    # Adjust handler signatures as features are added
-                    # For now, pass current_table to SET/GET
-                    if command in ('set', 'get'):
-                         response = await handler(current_table, *decoded_args)
-                    elif command == 'select':
-                         response = await handler(connection, *decoded_args)
-                         # Update current_table if SELECT was successful
-                         if not isinstance(response, RedisError):
-                              current_table = self.tables[connection.db]
-                              log.info(f"Client {peername} switched to DB {connection.db}")
-                    elif command in ('subscribe', 'unsubscribe', 'psubscribe', 'punsubscribe'):
-                         await handler(connection, *decoded_args)
-                         continue
-                    else:
-                         response = await handler(*decoded_args)
-                else:
-                    response = RedisError(f"unknown command '{command}'")
-
-                # 4. Send response
-                encoded_response = await self._encode_response(response)
-                writer.write(encoded_response)
-                await writer.drain()
-
-                # Special case for QUIT
-                if command == 'quit':
-                    log.info(f"Client requested QUIT: {peername}")
-                    break
-
-            except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError) as e:
-                log.info(f"Connection error with {peername}: {e}")
-                break
-            except RedisError as e:
-                log.warning(f"Redis error for {peername}: {e.message}")
-                writer.write(str(e).encode())
-                await writer.drain()
-            except Exception as e:
-                log.exception(f"Unexpected error handling client {peername}: {e}")
-                try:
-                    writer.write(str(RedisError(f"Internal server error: {e}")).encode())
-                    await writer.drain()
-                except (ConnectionResetError, BrokenPipeError):
-                    pass # Client likely disconnected
-                break # Stop handling this client on unexpected errors
-
-        # Cleanup
         try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception as e:
-            log.debug(f"Error during writer close for {peername}: {e}")
-        log.info(f"Connection closed for {peername}")
+            while True:
+                try:
+                    # 1. Read the command type and count
+                    line = await reader.readline()
+                    if not line or line == b'': # Connection closed
+                        log.info(f"Client disconnected: {connection_key}")
+                        break
+                    if not line.startswith(b'*'):
+                        writer.write(str(RedisError("Protocol error: expected array")).encode())
+                        await writer.drain()
+                        continue
+
+                    try:
+                        item_count = int(line[1:].strip())
+                    except ValueError:
+                        writer.write(str(RedisError("Protocol error: invalid array length")).encode())
+                        await writer.drain()
+                        continue
+
+                    # 2. Read command arguments
+                    args: List[bytes] = []
+                    for _ in range(item_count):
+                        # Read bulk string length
+                        len_line = await reader.readline()
+                        if not len_line or not len_line.startswith(b'$'):
+                            raise RedisError("Protocol error: expected bulk string length")
+                        try:
+                            length = int(len_line[1:].strip())
+                        except ValueError:
+                             raise RedisError("Protocol error: invalid bulk string length")
+
+                        if length == -1:
+                            args.append(b"") # Represent null bulk string as empty bytes for simplicity here
+                        else:
+                            # Read bulk string data + CRLF
+                            data = await reader.readexactly(length + 2)
+                            if data[-2:] != b'\r\n':
+                                raise RedisError("Protocol error: expected CRLF after bulk string")
+                            args.append(data[:-2])
+
+                    if not args:
+                        continue # Should not happen if item_count > 0
+
+                    # 3. Decode command and dispatch
+                    command = args[0].decode().lower()
+                    decoded_args = [arg.decode() for arg in args[1:]] # Decode remaining args
+
+                    log.debug(f"Client {connection_key} executing command: {command} {decoded_args}")
+
+                    handler_name = f"handle_{command}"
+                    response: Any
+                    if hasattr(self, handler_name):
+                        handler = getattr(self, handler_name)
+                        # Get current table based on connection's selected DB
+                        if connection.db not in self.tables:
+                            self.tables[connection.db] = {}
+                        current_table = self.tables[connection.db]
+                        
+                        # Pass the current table to commands that operate directly on data
+                        if command in ('set', 'get'):
+                            response = await handler(current_table, *decoded_args)
+                        elif command == 'select':
+                            response = await handler(connection, *decoded_args)
+                            # Update current_table if SELECT was successful
+                            if not isinstance(response, RedisError):
+                                if connection.db not in self.tables:
+                                    self.tables[connection.db] = {}
+                                log.info(f"Client {connection_key} switched to DB {connection.db}")
+                        elif command in ('subscribe', 'unsubscribe', 'psubscribe', 'punsubscribe'):
+                            await handler(connection, *decoded_args)
+                            continue
+                        else:
+                            # For all other commands, temporarily ensure the task has the connection
+                            # This creates a consistent context for all command handlers
+                            old_connection = getattr(task, 'connection', None)
+                            setattr(task, 'connection', connection)
+                            try:
+                                response = await handler(*decoded_args)
+                            finally:
+                                # Restore the original connection if there was one
+                                if old_connection:
+                                    setattr(task, 'connection', old_connection)
+                                else:
+                                    setattr(task, 'connection', connection)
+                    else:
+                        response = RedisError(f"unknown command '{command}'")
+
+                    # 4. Send response
+                    encoded_response = await self._encode_response(response)
+                    writer.write(encoded_response)
+                    await writer.drain()
+
+                    # Special case for QUIT
+                    if command == 'quit':
+                        log.info(f"Client requested QUIT: {connection_key}")
+                        break
+
+                except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError) as e:
+                    log.info(f"Connection error with {connection_key}: {e}")
+                    break
+                except RedisError as e:
+                    log.warning(f"Redis error for {connection_key}: {e.message}")
+                    writer.write(str(e).encode())
+                    await writer.drain()
+                except Exception as e:
+                    log.exception(f"Unexpected error handling client {connection_key}: {e}")
+                    try:
+                        writer.write(str(RedisError(f"Internal server error: {e}")).encode())
+                        await writer.drain()
+                    except (ConnectionResetError, BrokenPipeError):
+                        pass # Client likely disconnected
+                    break # Stop handling this client on unexpected errors
+        finally:
+            # Cleanup
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception as e:
+                log.debug(f"Error during writer close for {connection_key}: {e}")
+                
+            log.info(f"Connection closed for {connection_key}")
+            # Remove connection from task when done
+            if hasattr(task, 'connection'):
+                delattr(task, 'connection')
+                
+            # Remove the client connection from tracking
+            if connection_key in self.client_connections:
+                log.info(f"Removing client connection {connection_key} from tracking")
+                del self.client_connections[connection_key]
 
     # --- Command Handlers ---
 
@@ -294,15 +333,28 @@ class AsyncRedisServer:
         else:
             return RedisError("wrong number of arguments for 'ping' command")
 
-    async def handle_set(self, table: Dict[str, Any], key: str, value: str, *options: str) -> bool:
-        log.debug(f"Handling SET {key} = {value} in DB { {k for k, v in self.tables.items() if v is table}.pop() }") # Find DB num for logging
+    async def handle_set(self, table: Dict[str, Any], key: str, value: str, *options: str) -> str:
+        # Find the DB number safely for logging
+        db_nums = [db for db, t in self.tables.items() if t is table]
+        db_num = db_nums[0] if db_nums else "unknown"
+        log.debug(f"Handling SET {key} = {value} in DB {db_num}")
+        
         if not key or value is None: # Basic validation
              return RedisError("wrong number of arguments for 'set' command")
+             
+        # Remove any expiration when setting a key (Redis behavior)
+        if isinstance(db_num, int) and f"{db_num} {key}" in self.timeouts:
+            del self.timeouts[f"{db_num} {key}"]
+            
         table[key] = value # Use the passed table
-        return True # Returns "+OK" via encoding
+        return "OK" # Returns "+OK" in Redis protocol
 
     async def handle_get(self, table: Dict[str, Any], key: str) -> Optional[str]:
-        log.debug(f"Handling GET {key} in DB { {k for k, v in self.tables.items() if v is table}.pop() }")
+        # Find the DB number safely for logging
+        db_nums = [db for db, t in self.tables.items() if t is table]
+        db_num = db_nums[0] if db_nums else "unknown"
+        log.debug(f"Handling GET {key} in DB {db_num}")
+        
         if not key:
             return RedisError("wrong number of arguments for 'get' command")
         return table.get(key) # Use the passed table
@@ -332,6 +384,38 @@ class AsyncRedisServer:
     async def handle_quit(self) -> RedisMessage:
         # Response is sent before connection is closed by the handler loop
         return RedisMessage("OK")
+
+    # --- Server Management Commands ---
+    
+    async def handle_flushdb(self) -> int:
+        """Remove all keys from the current DB."""
+        # Try all DBs if we don't have connection context
+        if 'connection' in locals():
+            db_nums = [connection.db]
+        else:
+            db_nums = list(self.tables.keys())
+            
+        for db_num in db_nums:
+            # Clear the DB
+            self.tables[db_num] = {}
+            
+            # Remove any timeouts for this DB
+            for timeout_key in list(self.timeouts.keys()):
+                if timeout_key.startswith(f"{db_num} "):
+                    del self.timeouts[timeout_key]
+        
+        return 1  # Return integer 1 for Redis protocol OK
+        
+    async def handle_flushall(self) -> int:
+        """Remove all keys from all DBs."""
+        # Clear all DBs
+        for db_num in list(self.tables.keys()):
+            self.tables[db_num] = {}
+            
+        # Clear all timeouts
+        self.timeouts = {}
+            
+        return 1  # Return integer 1 for Redis protocol OK
 
     # --- PubSub Commands ---
 
@@ -543,45 +627,50 @@ class AsyncRedisServer:
         if not args:
             return RedisError("wrong number of arguments for 'del' command")
         
+        # Get the correct DB from the current task's connection
+        task = asyncio.current_task()
+        if task and hasattr(task, 'connection'):
+            connection = getattr(task, 'connection')
+            db_num = connection.db
+        else:
+            db_num = 0  # Default to DB 0
+        
         count = 0
         for key in args:
-            # Remove any expiration for this key
-            timeout_key = f"{connection.db} {key}" if 'connection' in locals() else None
-            if timeout_key and timeout_key in self.timeouts:
+            # Check if key exists and remove timeouts
+            timeout_key = f"{db_num} {key}"
+            if timeout_key in self.timeouts:
                 del self.timeouts[timeout_key]
             
-            # Try to delete from all DBs if we don't have connection context
-            if 'connection' in locals():
-                db_nums = [connection.db]
-            else:
-                db_nums = list(self.tables.keys())
-            
             # Delete the key from DB
-            for db_num in db_nums:
-                if key in self.tables[db_num]:
-                    del self.tables[db_num][key]
-                    count += 1
-                    break
+            if key in self.tables[db_num]:
+                del self.tables[db_num][key]
+                count += 1
         
         return count
 
-    async def handle_exists(self, key: str) -> int:
-        """Check if a key exists"""
-        if not key:
+    async def handle_exists(self, *keys: str) -> int:
+        """Check if one or more keys exist"""
+        if not keys:
             return RedisError("wrong number of arguments for 'exists' command")
         
-        # Try all DBs if we don't have connection context
-        if 'connection' in locals():
-            db_nums = [connection.db]
+        # Get the correct DB from the current task's connection
+        task = asyncio.current_task()
+        if task and hasattr(task, 'connection'):
+            connection = getattr(task, 'connection')
+            db_num = connection.db
         else:
-            db_nums = list(self.tables.keys())
-        
-        for db_num in db_nums:
-            exists = await self.check_ttl(db_num, key)
-            if exists:
-                return 1
-        
-        return 0
+            db_num = 0  # Default to DB 0 if no connection context
+            
+        count = 0
+        for key in keys:
+            # Check if key exists in the current DB
+            if key in self.tables[db_num]:
+                # Check TTL - skip if expired
+                if await self.check_ttl(db_num, key):
+                    count += 1
+                    
+        return count
 
     async def handle_expire(self, key: str, seconds: str) -> int:
         """Set a key's time to live in seconds"""
@@ -593,26 +682,60 @@ class AsyncRedisServer:
         except ValueError:
             return RedisError("value is not an integer or out of range")
         
-        # Try all DBs if we don't have connection context
-        if 'connection' in locals():
+        # Get the correct DB from the current task's connection
+        task = asyncio.current_task()
+        if task and hasattr(task, 'connection'):
+            connection = getattr(task, 'connection')
+            db_num = connection.db
+            
+            # Check if key exists in this specific db
+            if key in self.tables[db_num]:
+                self.timeouts[f"{db_num} {key}"] = time.time() + ttl
+                return 1
+            return 0  # Key doesn't exist
+        else:
+            # Fallback to checking all DBs
+            db_nums = list(self.tables.keys())
+            for db_num in db_nums:
+                if key in self.tables[db_num]:
+                    self.timeouts[f"{db_num} {key}"] = time.time() + ttl
+                    return 1
+            return 0
+
+    async def handle_expireat(self, key: str, timestamp: str) -> int:
+        """Set the expiration for a key at a UNIX timestamp"""
+        if not key or not timestamp:
+            return RedisError("wrong number of arguments for 'expireat' command")
+        
+        try:
+            ts = int(timestamp)
+        except ValueError:
+            return RedisError("value is not an integer or out of range")
+        
+        # Get the correct DB from the current task's connection
+        task = asyncio.current_task()
+        if task and hasattr(task, 'connection'):
+            connection = getattr(task, 'connection')
             db_nums = [connection.db]
         else:
             db_nums = list(self.tables.keys())
         
         for db_num in db_nums:
             if key in self.tables[db_num]:
-                self.timeouts[f"{db_num} {key}"] = time.time() + ttl
+                self.timeouts[f"{db_num} {key}"] = ts
                 return 1
         
-        return 0
+        return 0  # Key does not exist
 
     async def handle_ttl(self, key: str) -> int:
         """Get the time to live for a key in seconds"""
         if not key:
             return RedisError("wrong number of arguments for 'ttl' command")
             
-        # Try all DBs if we don't have connection context
-        if 'connection' in locals():
+        # Get the correct DB from the current task's connection
+        task = asyncio.current_task()
+        if task and hasattr(task, 'connection'):
+            connection = getattr(task, 'connection')
             db_nums = [connection.db]
         else:
             db_nums = list(self.tables.keys())
@@ -674,32 +797,37 @@ class AsyncRedisServer:
         
         return 0
 
-    async def handle_keys(self, pattern: str) -> list:
+    async def handle_keys(self, pattern: str) -> List[bytes]:
         """Find all keys matching the given pattern"""
         if not pattern:
             return RedisError("wrong number of arguments for 'keys' command")
             
-        # Try all DBs if we don't have connection context
-        if 'connection' in locals():
-            db_nums = [connection.db]
+        # Get the correct DB from the current task's connection
+        task = asyncio.current_task()
+        if task and hasattr(task, 'connection'):
+            connection = getattr(task, 'connection')
+            db_num = connection.db
         else:
-            db_nums = list(self.tables.keys())
-        
-        matching_keys = []
-        regex = re.compile("^" + pattern.replace("*", ".*") + "$")
-        
-        for db_num in db_nums:
-            # Get all valid keys (not expired)
-            valid_keys = []
-            for key in self.tables[db_num].keys():
-                if await self.check_ttl(db_num, key):
-                    valid_keys.append(key)
+            db_num = 0  # Default to DB 0 if no connection context
             
-            # Find matches
-            for key in valid_keys:
-                if regex.match(key):
-                    matching_keys.append(key)
+        matching_keys = []
         
+        # Properly escape regex special characters in the pattern except * and ?
+        pattern_regex = re.escape(pattern).replace('\\*', '.*').replace('\\?', '.')
+        regex = re.compile(f"^{pattern_regex}$")
+        
+        # Look through each key in the specific DB only
+        if db_num in self.tables:
+            for key in list(self.tables[db_num].keys()):
+                # Skip expired keys
+                if not await self.check_ttl(db_num, key):
+                    continue
+                    
+                # Check if key matches pattern
+                if regex.match(key):
+                    # Return key as bytes for Redis protocol compatibility
+                    matching_keys.append(key.encode())
+                    
         return matching_keys
 
     async def handle_type(self, key: str) -> RedisMessage:
@@ -879,7 +1007,7 @@ class AsyncRedisServer:
         # Should not reach here if at least one DB exists
         return None
         
-    async def handle_setex(self, key: str, seconds: str, value: str) -> bool:
+    async def handle_setex(self, key: str, seconds: str, value: str) -> str:
         """Set the value and expiration of a key"""
         if not key or not seconds or value is None:
             return RedisError("wrong number of arguments for 'setex' command")
@@ -892,7 +1020,9 @@ class AsyncRedisServer:
             return RedisError("value is not an integer or out of range")
             
         # Try all DBs if we don't have connection context
-        if 'connection' in locals():
+        task = asyncio.current_task()
+        if task and hasattr(task, 'connection'):
+            connection = getattr(task, 'connection')
             db_nums = [connection.db]
         else:
             db_nums = list(self.tables.keys())
@@ -902,10 +1032,10 @@ class AsyncRedisServer:
             self.tables[db_num][key] = value
             # Set expiration
             self.timeouts[f"{db_num} {key}"] = time.time() + ttl
-            return True
+            return "OK"  # Return "OK" instead of True
             
         # Should not reach here if at least one DB exists
-        return False
+        return "OK"  # Default to OK
         
     async def handle_setnx(self, key: str, value: str) -> int:
         """Set the value of a key, only if the key does not exist"""
@@ -1447,7 +1577,9 @@ class AsyncRedisServer:
                 withscores = True
                 
         # Try all DBs if we don't have connection context
-        if 'connection' in locals():
+        task = asyncio.current_task()
+        if task and hasattr(task, 'connection'):
+            connection = getattr(task, 'connection')
             db_nums = [connection.db]
         else:
             db_nums = list(self.tables.keys())
@@ -1461,324 +1593,125 @@ class AsyncRedisServer:
             if not isinstance(data, SortedSet):
                 return BAD_VALUE
                 
-            # Return the range
-            return data.zrange(start_idx, stop_idx, withscores=withscores)
+            # Handle negative indices like Redis
+            length = len(data)
+            if start_idx < 0:
+                start_idx = length + start_idx
+            if stop_idx < 0:
+                stop_idx = length + stop_idx
+                
+            # Clamp indices
+            start_idx = max(0, start_idx)
+            stop_idx = min(length - 1, stop_idx)
+            
+            # Get the range including scores if requested
+            if start_idx <= stop_idx:
+                result = []
+                items = data.range_by_rank(start_idx, stop_idx + 1)
+                for member, score in items:
+                    result.append(member)
+                    if withscores:
+                        result.append(str(score))
+                return result
+            return []
             
         return []  # Key does not exist
-            
-    async def handle_zrevrange(self, key: str, start: str, stop: str, *args: str) -> list:
-        """Return a range of members from a sorted set, by index, with scores ordered from high to low"""
-        if not key or start is None or stop is None:
-            return RedisError("wrong number of arguments for 'zrevrange' command")
-            
-        try:
-            start_idx = int(start)
-            stop_idx = int(stop)
-        except ValueError:
-            return RedisError("value is not an integer")
-            
-        # Parse options
-        withscores = False
-        for arg in args:
-            if arg.lower() == "withscores":
-                withscores = True
-                
-        # Try all DBs if we don't have connection context
-        if 'connection' in locals():
-            db_nums = [connection.db]
-        else:
-            db_nums = list(self.tables.keys())
-            
-        for db_num in db_nums:
-            # Check if key exists
-            if not await self.check_ttl(db_num, key) or key not in self.tables[db_num]:
-                return []
-                
-            data = self.tables[db_num][key]
-            if not isinstance(data, SortedSet):
-                return BAD_VALUE
-                
-            # Return the reversed range
-            return data.zrevrange(start_idx, stop_idx, withscores=withscores)
-            
-        return []  # Key does not exist
-            
-    async def handle_zrangebyscore(self, key: str, min_score: str, max_score: str, *args: str) -> list:
-        """Return members with scores between min and max"""
-        if not key or min_score is None or max_score is None:
-            return RedisError("wrong number of arguments for 'zrangebyscore' command")
-            
-        # Parse options
-        withscores = False
-        limit = None
-        
-        i = 0
-        while i < len(args):
-            arg = args[i].lower()
-            if arg == "withscores":
-                withscores = True
-                i += 1
-            elif arg == "limit" and i + 2 < len(args):
-                try:
-                    offset = int(args[i+1])
-                    count = int(args[i+2])
-                    limit = (offset, count)
-                    i += 3
-                except ValueError:
-                    return RedisError("limit arguments must be integers")
-            else:
-                i += 1
-                
-        # Try all DBs if we don't have connection context
-        if 'connection' in locals():
-            db_nums = [connection.db]
-        else:
-            db_nums = list(self.tables.keys())
-            
-        for db_num in db_nums:
-            # Check if key exists
-            if not await self.check_ttl(db_num, key) or key not in self.tables[db_num]:
-                return []
-                
-            data = self.tables[db_num][key]
-            if not isinstance(data, SortedSet):
-                return BAD_VALUE
-                
-            # Return the members with scores in range
-            return data.zrangebyscore(min_score, max_score, withscores=withscores, limit=limit)
-            
-        return []  # Key does not exist
-            
-    async def handle_zrevrangebyscore(self, key: str, max_score: str, min_score: str, *args: str) -> list:
-        """Return members with scores between max and min, ordered from high to low"""
-        if not key or min_score is None or max_score is None:
-            return RedisError("wrong number of arguments for 'zrevrangebyscore' command")
-            
-        # Parse options
-        withscores = False
-        limit = None
-        
-        i = 0
-        while i < len(args):
-            arg = args[i].lower()
-            if arg == "withscores":
-                withscores = True
-                i += 1
-            elif arg == "limit" and i + 2 < len(args):
-                try:
-                    offset = int(args[i+1])
-                    count = int(args[i+2])
-                    limit = (offset, count)
-                    i += 3
-                except ValueError:
-                    return RedisError("limit arguments must be integers")
-            else:
-                i += 1
-                
-        # Try all DBs if we don't have connection context
-        if 'connection' in locals():
-            db_nums = [connection.db]
-        else:
-            db_nums = list(self.tables.keys())
-            
-        for db_num in db_nums:
-            # Check if key exists
-            if not await self.check_ttl(db_num, key) or key not in self.tables[db_num]:
-                return []
-                
-            data = self.tables[db_num][key]
-            if not isinstance(data, SortedSet):
-                return BAD_VALUE
-                
-            # Return the members with scores in range, ordered from high to low
-            return data.zrevrangebyscore(max_score, min_score, withscores=withscores, limit=limit)
-            
-        return []  # Key does not exist
-            
-    async def handle_zrem(self, key: str, *members: str) -> int:
-        """Remove one or more members from a sorted set"""
-        if not key or not members:
-            return RedisError("wrong number of arguments for 'zrem' command")
-            
-        # Try all DBs if we don't have connection context
-        if 'connection' in locals():
-            db_nums = [connection.db]
-        else:
-            db_nums = list(self.tables.keys())
-            
-        for db_num in db_nums:
-            # Check if key exists
-            if not await self.check_ttl(db_num, key) or key not in self.tables[db_num]:
-                return 0
-                
-            data = self.tables[db_num][key]
-            if not isinstance(data, SortedSet):
-                return BAD_VALUE
-                
-            # Remove the members
-            return data.zrem(*members)
-            
-        return 0  # Key does not exist
-            
-    async def handle_zscore(self, key: str, member: str) -> Optional[str]:
-        """Return the score of a member in the sorted set"""
-        if not key or not member:
-            return RedisError("wrong number of arguments for 'zscore' command")
-            
-        # Try all DBs if we don't have connection context
-        if 'connection' in locals():
-            db_nums = [connection.db]
-        else:
-            db_nums = list(self.tables.keys())
-            
-        for db_num in db_nums:
-            # Check if key exists
-            if not await self.check_ttl(db_num, key) or key not in self.tables[db_num]:
-                return None
-                
-            data = self.tables[db_num][key]
-            if not isinstance(data, SortedSet):
-                return BAD_VALUE
-                
-            # Get the score
-            score = data.zscore(member)
-            if score is None:
-                return None
-                
-            # Convert to string for Redis protocol
-            return str(score)
-            
-        return None  # Key does not exist
-            
-    async def handle_zcard(self, key: str) -> int:
-        """Return the number of members in a sorted set"""
-        if not key:
-            return RedisError("wrong number of arguments for 'zcard' command")
-            
-        # Try all DBs if we don't have connection context
-        if 'connection' in locals():
-            db_nums = [connection.db]
-        else:
-            db_nums = list(self.tables.keys())
-            
-        for db_num in db_nums:
-            # Check if key exists
-            if not await self.check_ttl(db_num, key) or key not in self.tables[db_num]:
-                return 0
-                
-            data = self.tables[db_num][key]
-            if not isinstance(data, SortedSet):
-                return BAD_VALUE
-                
-            # Return the cardinality
-            return data.zcard()
-            
-        return 0  # Key does not exist
-            
-    async def handle_zcount(self, key: str, min_score: str, max_score: str) -> int:
-        """Count members with scores between min and max"""
-        if not key or min_score is None or max_score is None:
-            return RedisError("wrong number of arguments for 'zcount' command")
-            
-        # Try all DBs if we don't have connection context
-        if 'connection' in locals():
-            db_nums = [connection.db]
-        else:
-            db_nums = list(self.tables.keys())
-            
-        for db_num in db_nums:
-            # Check if key exists
-            if not await self.check_ttl(db_num, key) or key not in self.tables[db_num]:
-                return 0
-                
-            data = self.tables[db_num][key]
-            if not isinstance(data, SortedSet):
-                return BAD_VALUE
-                
-            # Return count of members with scores in range
-            return data.zcount(min_score, max_score)
-            
-        return 0  # Key does not exist
-
-    # --- Server Lifecycle ---
 
     async def start(self) -> None:
-        """Starts the asyncio server."""
-        try:
-            self._server = await asyncio.start_server(
-                self.handle_client, self.host, self.port
-            )
-            addr = self._server.sockets[0].getsockname()
-            log.info(f"Server listening on {addr}")
-            async with self._server:
-                await self._server.serve_forever()
-        except asyncio.CancelledError:
-             log.info("Server start cancelled.")
-        except Exception as e:
-            log.exception(f"Error starting server: {e}")
-        finally:
-             log.info("Server finished serving.")
-
+        """Start the Redis server."""
+        log.info(f"Starting AsyncRedisServer on {self.host}:{self.port}")
+        self._server = await asyncio.start_server(
+            self.handle_client,
+            self.host,
+            self.port
+        )
+        
+        # Create a background task to check for expired keys
+        self._expiry_task = asyncio.create_task(self._check_expirations())
+        
+        # Create a background task to periodically save data
+        self._save_task = asyncio.create_task(self._auto_save())
+        
+        addr = self._server.sockets[0].getsockname() if self._server.sockets else (self.host, self.port)
+        log.info(f"AsyncRedisServer running on {addr[0]}:{addr[1]}")
+        
     async def stop(self) -> None:
-        """Stops the asyncio server gracefully, saving data first."""
-        if not self._server:
-            return
-        log.info("Stopping server...")
-
-        # Save data before closing connections
+        """Stop the Redis server and close all connections."""
+        log.info("Stopping async Redis server...")
+        
+        # Cancel background tasks
+        if hasattr(self, '_expiry_task') and self._expiry_task:
+            self._expiry_task.cancel()
+            
+        if hasattr(self, '_save_task') and self._save_task:
+            self._save_task.cancel()
+        
+        # Save data before shutdown
         await self.save_data()
-
-        self._server.close()
-        await self._server.wait_closed()
-        log.info("Server socket closed.")
-
-        # Optionally cancel running client tasks
-        if self._tasks:
-             log.info(f"Cancelling {len(self._tasks)} client tasks...")
-             for task in list(self._tasks):
-                  task.cancel()
-             # Give tasks a moment to finish cancelling
-             await asyncio.gather(*self._tasks, return_exceptions=True)
-             log.info("Client tasks cancelled.")
-
-        self._server = None
-        log.info("Server stopped.")
-
-async def main():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    server = AsyncRedisServer()
-
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
-
-    def signal_handler():
-        log.info("Shutdown signal received.")
-        stop_event.set()
-
-    # Add signal handlers for graceful shutdown
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, signal_handler)
-        except NotImplementedError:
-             # Windows doesn't support add_signal_handler
-             log.warning(f"Signal {sig} handling not supported on this platform.")
-
-    server_task = asyncio.create_task(server.start())
-
-    # Wait until stop signal is received
-    await stop_event.wait()
-
-    # Initiate graceful shutdown
-    log.info("Initiating graceful shutdown...")
-    await server.stop()
-
-    # Allow the server task to complete its cleanup
-    await server_task
-    log.info("Shutdown complete.")
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        log.info("KeyboardInterrupt caught in __main__, exiting.")
+        
+        # Close the server
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+            
+        # Cancel any remaining client tasks
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+                
+        log.info("AsyncRedisServer stopped.")
+        
+    async def _check_expirations(self) -> None:
+        """Background task to check for expired keys."""
+        while True:
+            try:
+                # Check each timeout entry
+                for key in list(self.timeouts.keys()):
+                    try:
+                        db_key = key.split(' ', 1)
+                        if len(db_key) != 2:
+                            continue
+                            
+                        db_num = int(db_key[0])
+                        key_name = db_key[1]
+                        
+                        # If expired, remove the key
+                        if self.timeouts[key] <= time.time():
+                            if db_num in self.tables and key_name in self.tables[db_num]:
+                                del self.tables[db_num][key_name]
+                            del self.timeouts[key]
+                    except (ValueError, KeyError):
+                        # Skip invalid entries
+                        continue
+                
+                # Sleep to avoid consuming too many resources
+                await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                # Clean exit on cancellation
+                break
+            except Exception as e:
+                log.exception(f"Error in expiration check: {e}")
+                # Continue running despite errors
+                await asyncio.sleep(1)
+                
+    async def _auto_save(self) -> None:
+        """Background task to periodically save data."""
+        save_interval = 300  # Save every 5 minutes
+        last_save = time.time()
+        
+        while True:
+            try:
+                current_time = time.time()
+                if current_time - last_save >= save_interval:
+                    await self.save_data()
+                    last_save = current_time
+                    
+                # Sleep for a bit to avoid frequent checks
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                # Clean exit on cancellation
+                break
+            except Exception as e:
+                log.exception(f"Error in auto-save: {e}")
+                # Continue running despite errors
+                await asyncio.sleep(60)
