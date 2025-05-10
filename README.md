@@ -8,7 +8,7 @@ The original intent was to have a minimally working (if naïve) PubSub implement
 
 ## Performance
 
-Extremely dependent on Python runtime and workload, of course. Your mileage may vary.
+Pure Python performance, dependent on runtime and workload. Your mileage may vary.
 
 ## Credits
 

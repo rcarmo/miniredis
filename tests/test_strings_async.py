@@ -2,30 +2,46 @@
 import os
 import sys
 import time
-import pytest # Changed from unittest
+import pytest
 from multiprocessing import Process
 from typing import Generator, Any
 
-# Changed from relative import to absolute import
-from tests.helpers import start_server, stop_server
+# Import helpers for async server testing
+from tests.helpers_async import start_async_server, stop_async_server
 from miniredis.client import RedisClient
 
-# Use the same fixture as test_keys.py if tests can share the same server instance
-# If they need independent servers, define a similar fixture here or adjust scope.
-# For simplicity, let's assume they can share the module-scoped server.
-# If you defined the fixture in conftest.py, you wouldn't need to import it here.
-from tests.test_keys import redis_client # Changed to absolute import
+@pytest.fixture(scope="module")
+def redis_client_async() -> Generator[RedisClient, None, None]:
+    """Pytest fixture to start/stop the async miniredis server and provide a client."""
+    server_process: Process | None = None
+    r_client: RedisClient | None = None
+    try:
+        server_process, test_port = start_async_server()
+        r_client = RedisClient(port=test_port)
+        r_client.flushdb() # Flush DB before tests start
+        yield r_client # Provide the client to the tests
+    except Exception as e:
+        print(f"Error during fixture setup in test_strings_async: {e}")
+        pytest.fail(f"Fixture setup failed: {e}") # Fail tests if fixture fails
+    finally:
+        # Teardown: Stop client and server
+        print("Tearing down test_strings_async fixture...")
+        if r_client:
+            try:
+                r_client.close()
+                print("Redis client closed.")
+            except Exception as e:
+                print(f"Error closing redis client: {e}")
+        if server_process:
+            stop_async_server(server_process)
+        print("Fixture teardown complete.")
 
-# No longer need unittest.TestCase
-class TestStringCommands:
+class TestAsyncStringCommands:
+    """Test Redis string commands with the async server implementation."""
 
-    # No longer need setUp with module-scoped fixture
-    # def setUp(self):
-    #     pass
-
-    def test_append(self, redis_client: RedisClient):
+    def test_append(self, redis_client_async: RedisClient):
         """Test APPEND command"""
-        r = redis_client
+        r = redis_client_async
         # Key exists
         assert r.set('test:append:key1', 'value') == 'OK'
         assert r.append('test:append:key1', 'more') == 9 # Returns length after append
@@ -40,9 +56,9 @@ class TestStringCommands:
         with pytest.raises(Exception, match="Operation against a key holding the wrong kind of value"):
             r.append('test:append:list', 'stuff')
 
-    def test_incr_decr(self, redis_client: RedisClient):
+    def test_incr_decr(self, redis_client_async: RedisClient):
         """Test INCR and DECR commands"""
-        r = redis_client
+        r = redis_client_async
         assert r.set('test:counter', '10') == 'OK'
         assert r.incr('test:counter') == 11
         assert r.get('test:counter') == b'11'
@@ -68,9 +84,9 @@ class TestStringCommands:
         with pytest.raises(Exception, match="value is not an integer"):
             r.decr('test:notint')
 
-    def test_getset(self, redis_client: RedisClient):
+    def test_getset(self, redis_client_async: RedisClient):
         """Test GETSET command"""
-        r = redis_client
+        r = redis_client_async
         # Key exists
         r.set('test:getset:key1', 'oldvalue')
         old: bytes | None = r.getset('test:getset:key1', 'newvalue')
@@ -87,9 +103,9 @@ class TestStringCommands:
         with pytest.raises(Exception, match="Operation against a key holding the wrong kind of value"):
             r.getset('test:getset:list', 'new')
 
-    def test_mget(self, redis_client: RedisClient):
+    def test_mget(self, redis_client_async: RedisClient):
         """Test MGET command"""
-        r = redis_client
+        r = redis_client_async
         r.set('test:mget:key1', 'val1')
         r.set('test:mget:key2', 'val2')
         r.lpush('test:mget:list', 'item') # A non-string key
@@ -101,9 +117,9 @@ class TestStringCommands:
         # Empty list
         assert r.mget() == []
 
-    def test_setnx(self, redis_client: RedisClient):
+    def test_setnx(self, redis_client_async: RedisClient):
         """Test SETNX command"""
-        r = redis_client
+        r = redis_client_async
         # Key does not exist
         assert r.setnx('test:setnx:key1', 'value1') == 1
         assert r.get('test:setnx:key1') == b'value1'
@@ -112,9 +128,9 @@ class TestStringCommands:
         assert r.setnx('test:setnx:key1', 'value2') == 0
         assert r.get('test:setnx:key1') == b'value1' # Value should not change
 
-    def test_setex(self, redis_client: RedisClient):
+    def test_setex(self, redis_client_async: RedisClient):
         """Test SETEX command"""
-        r = redis_client
+        r = redis_client_async
         assert r.setex('test:setex:key1', 2, 'value') == 'OK'
         assert r.get('test:setex:key1') == b'value'
         ttl = r.ttl('test:setex:key1')
@@ -134,8 +150,3 @@ class TestStringCommands:
         with pytest.raises(Exception, match="invalid expire time"):
             # Check specific error if server provides one, otherwise generic Exception
             r.setex('test:setex:key3', -10, 'value')
-
-# No longer need nose specific execution block
-# if __name__ == '__main__':
-#    import nose
-#    nose.runmodule()

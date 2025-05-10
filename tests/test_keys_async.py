@@ -6,26 +6,26 @@ import pytest
 from multiprocessing import Process
 from typing import Generator
 
-# Changed from relative import to absolute import
-from tests.helpers import start_server, stop_server
+# Import helpers for async server testing
+from tests.helpers_async import start_async_server, stop_async_server
 from miniredis.client import RedisClient
 
 @pytest.fixture(scope="module")
-def redis_client() -> Generator[RedisClient, None, None]:
-    """Pytest fixture to start/stop the miniredis server and provide a client."""
+def redis_client_async() -> Generator[RedisClient, None, None]:
+    """Pytest fixture to start/stop the async miniredis server and provide a client."""
     server_process: Process | None = None
     r_client: RedisClient | None = None
     try:
-        server_process, test_port = start_server()
+        server_process, test_port = start_async_server()
         r_client = RedisClient(port=test_port)
         r_client.flushdb() # Flush DB before tests start
         yield r_client # Provide the client to the tests
     except Exception as e:
-        print(f"Error during fixture setup in test_keys: {e}")
+        print(f"Error during fixture setup in test_keys_async: {e}")
         pytest.fail(f"Fixture setup failed: {e}") # Fail tests if fixture fails
     finally:
         # Teardown: Stop client and server
-        print("Tearing down test_keys fixture...")
+        print("Tearing down test_keys_async fixture...")
         if r_client:
             try:
                 r_client.close()
@@ -33,27 +33,28 @@ def redis_client() -> Generator[RedisClient, None, None]:
             except Exception as e:
                 print(f"Error closing redis client: {e}")
         if server_process:
-            stop_server(server_process)
+            stop_async_server(server_process)
         print("Fixture teardown complete.")
 
-class TestKeysCommands:
+class TestAsyncKeysCommands:
+    """Test Redis key commands with the async server implementation."""
 
-    def test_put_get(self, redis_client: RedisClient):
+    def test_put_get(self, redis_client_async: RedisClient):
         """Test basic SET and GET"""
-        r = redis_client
+        r = redis_client_async
         assert r.set("test:key", "value") == "OK"
         result = r.get("test:key")
         assert result == b"value"
         assert result.decode("utf-8") == "value"
 
-    def test_get_nonexistent(self, redis_client: RedisClient):
+    def test_get_nonexistent(self, redis_client_async: RedisClient):
         """Test GET on a non-existent key"""
-        r = redis_client
+        r = redis_client_async
         assert r.get("test:notakey") is None
 
-    def test_del(self, redis_client: RedisClient):
+    def test_del(self, redis_client_async: RedisClient):
         """Test DEL command"""
-        r = redis_client
+        r = redis_client_async
         r.set("test:keydel1", "value1")
         r.set("test:keydel2", "value2")
         r.set("test:keydel3", "value3")
@@ -67,16 +68,16 @@ class TestKeysCommands:
         # non-existent key
         assert r.delete("test:notthere") == 0
 
-    def test_exists(self, redis_client: RedisClient):
+    def test_exists(self, redis_client_async: RedisClient):
         """Test EXISTS command"""
-        r = redis_client
+        r = redis_client_async
         r.set("test:keyexists", "value")
         assert r.exists("test:keyexists") == 1
         assert r.exists("test:notthere") == 0
 
-    def test_expire_ttl(self, redis_client: RedisClient):
+    def test_expire_ttl(self, redis_client_async: RedisClient):
         """Test EXPIRE and TTL commands"""
-        r = redis_client
+        r = redis_client_async
         r.set("test:keyexpire", "value")
         # missing key
         assert r.expire("test:notthere", 2) == 0
@@ -96,9 +97,9 @@ class TestKeysCommands:
         assert r.set("test:keyexpire_reset", "newvalue") == "OK"
         assert r.ttl("test:keyexpire_reset") == -1  # SET should remove TTL
 
-    def test_expireat_pttl(self, redis_client: RedisClient):
+    def test_expireat_pttl(self, redis_client_async: RedisClient):
         """Test EXPIREAT and PTTL commands"""
-        r = redis_client
+        r = redis_client_async
         r.set("test:keyexpireat", "value")
         # missing key
         at_ts = int(time.time() + 2)
@@ -123,9 +124,9 @@ class TestKeysCommands:
         assert r.set("test:keyexpireat_reset", "newvalue") == "OK"
         assert r.pttl("test:keyexpireat_reset") == -1  # SET should remove TTL
 
-    def test_keys(self, redis_client: RedisClient):
+    def test_keys(self, redis_client_async: RedisClient):
         """Test KEYS command"""
-        r = redis_client
+        r = redis_client_async
         # Clear previous keys potentially matching pattern
         r.flushdb()
         # place test keys

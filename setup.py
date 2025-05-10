@@ -8,48 +8,35 @@ License: MIT (see LICENSE.md for details)
 """
 
 import os, sys
-from distutils.core import setup
-from distutils.extension import Extension
-from Cython.Distutils import build_ext
-from Cython.Build import cythonize
-from glob import glob
-
-
-try:
-    from Cython.Distutils import build_ext
-except:
-    print "You don't seem to have Cython installed"
-    sys.exit(1)
-
-def scandir(dir, files=[]):
-    for file in os.listdir(dir):
-        path = os.path.join(dir, file)
-        if os.path.isfile(path) and path.endswith(".py"):
-            files.append(path.replace(os.path.sep, ".")[:-3])
-        elif os.path.isdir(path):
-            scandir(path, files)
-    return files
-    
-def makeExtension(extName):
-    extPath = extName.replace(".", os.path.sep)+".py"
-    return Extension(
-        extName,
-        [extPath],
-        include_dirs = ["."],
-        extra_compile_args = ["-O3", "-Wall"],
-        extra_link_args = ['-g'],
-        libraries = [],
-    )    
-
-extNames = scandir("miniredis")
-extensions = [makeExtension(name) for name in extNames]
+from setuptools import setup, find_packages  # Use setuptools and find_packages
 
 setup(
-    name = "miniredis",
-    packages = "miniredis",
-    ext_modules=extensions,
-    cmdclass = {'build_ext': build_ext},
-    setup_requires=['nose'],
-    test_suite='nose.main',
+    name="miniredis",
+    version="0.1.0",
+    packages=find_packages(exclude=["tests*"]),  # Automatically find packages
+    setup_requires=['pytest-runner'],  # Update test runner
+    tests_require=['pytest'],  # Update test dependencies
+    author="Rui Carmo",
+    author_email="rui@example.com",  # Placeholder email
+    description="Pure Python Redis protocol subset implementation",
+    long_description=open("README.md").read(),
+    long_description_content_type="text/markdown",
+    license="MIT",
+    keywords="redis server mock test",
+    url="https://github.com/rcarmo/miniredis",
+    classifiers=[
+        "Development Status :: 4 - Beta",
+        "Intended Audience :: Developers",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Topic :: Software Development :: Testing",
+        "Topic :: Database :: Front-Ends",
+    ],
+    python_requires=">=3.7",
 )
-
